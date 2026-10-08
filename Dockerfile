@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12-slim AS build
+ARG FEDORA_VERSION=44
+
+FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION} AS build
 
 # There is no .git in the build context, so setuptools-scm can't tell the
 # version; pass it in: docker build --build-arg VERSION=1.2.3 .
@@ -8,19 +10,25 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION} \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+RUN dnf install -y --setopt=install_weak_deps=False python3 python3-pip \
+    && dnf clean all
+
 WORKDIR /src
 COPY pyproject.toml LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yandex_music_radio_dj ./yandex_music_radio_dj
-RUN python -m venv /opt/venv \
+RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install .
 
 
-FROM python:3.12-slim
+FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 
-# ffmpeg from Debian has libmp3lame, which the MP3 output needs.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
-    && rm -rf /var/lib/apt/lists/* \
+# ffmpeg-free has no libmp3lame, which the MP3 output needs: take ffmpeg
+# from RPM Fusion.
+RUN dnf install -y --setopt=install_weak_deps=False \
+        "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
+    && dnf install -y --setopt=install_weak_deps=False python3 ffmpeg \
+    && dnf clean all \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame \
     && useradd --system --uid 10001 --create-home --home-dir /home/radio radio \
     && mkdir /data && chown radio /data
 

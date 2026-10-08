@@ -50,7 +50,7 @@ include-package-data = true
 include = ["yandex_music_radio_dj", "yandex_music_radio_dj.*"]
 
 [tool.setuptools.package-data]
-"yandex_music_radio_dj" = ["contrib/*"]
+"yandex_music_radio_dj" = ["contrib/*", "web/*"]
 
 [tool.setuptools_scm]
 version_file = "yandex_music_radio_dj/_version.py"

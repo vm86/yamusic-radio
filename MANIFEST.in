@@ -1,2 +1,3 @@
 recursive-include yandex_music_radio_dj/contrib *.service
+recursive-include yandex_music_radio_dj/web *.html
 recursive-include yandex_music_radio_dj *.py

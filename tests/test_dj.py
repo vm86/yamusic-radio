@@ -1014,8 +1014,14 @@ async def test_rest_api(
     app = dj.make_app(dj.Broadcaster(), radio)
 
     async with TestClient(TestServer(app)) as client:
+        page = await client.get("/")
+        assert page.status == 200
+        assert page.content_type == "text/html"
+        assert "Яндекс Музыка DJ" in await page.text()
+
         queue = await (await client.get("/api/queue?next=2")).json()
         assert queue["now"]["title"] == deck.title
+        assert 0 <= queue["now"]["elapsed_seconds"] < 5
         assert len(queue["next"]) == 2
         assert (await client.get("/api/queue?next=x")).status == 400
 

@@ -17,6 +17,7 @@ import contextlib
 import logging
 import shutil
 import tempfile
+import time
 from asyncio import (
     CancelledError,
     Event,
@@ -75,6 +76,8 @@ REPLENISH_RETRY_SECONDS = 120
 MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
 MAX_LISTED = 15
+# The page the radio shows at /.
+WEB_PAGE = Path(__file__).parent / "web" / "index.html"
 # Tracks played before a restart that the radio does not pick again.
 CACHED_PLAYED_SKIPPED = 200
 # The next track is chosen and decoded this long before the blend.
@@ -244,6 +247,7 @@ class Radio:
         # What the API shows: the track heard now, the ones before it and
         # the one already decoded to come next.
         self._now: Deck | None = None
+        self._now_since = 0.0
         self._next: Deck | None = None
         self._before: deque[TrackInfo] = deque(maxlen=MAX_LISTED)
         # Only these station moods are played; empty is any.
@@ -353,7 +357,16 @@ class Radio:
             "previous": [
                 t.to_dict() for t in list(self._before)[-before:] if before
             ],
-            "now": now.to_dict() if now is not None else None,
+            "now": (
+                {
+                    **now.to_dict(),
+                    "elapsed_seconds": round(
+                        time.monotonic() - self._now_since, 1
+                    ),
+                }
+                if now is not None
+                else None
+            ),
             "next": [t.to_dict() for t in self.upcoming(after)],
             "moods": self.moods_info(),
         }
@@ -692,6 +705,7 @@ class Radio:
                 )
             )
         self._now = deck
+        self._now_since = time.monotonic()
         if self._next is deck:
             self._next = None
         self._send_feedback(deck, "trackStarted", 0.0)
@@ -911,7 +925,9 @@ def add_api(app: web.Application, radio: Radio) -> None:
 def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
     async def index(_: web.Request) -> web.Response:
         return web.Response(
-            text=f"{ICY_NAME}: stream is at /stream\nNow playing: {hub.title}\n"
+            body=WEB_PAGE.read_bytes(),
+            content_type="text/html",
+            charset="utf-8",
         )
 
     async def stream(request: web.Request) -> web.StreamResponse:

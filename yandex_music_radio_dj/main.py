@@ -67,6 +67,15 @@ def parse_args() -> Namespace:
         help="Run foreground",
     )
     parser.add_argument(
+        "--foreground",
+        action="store_true",
+        default=False,
+        help=(
+            "Don't fork into the background and log to stderr (for "
+            "containers; SIGTERM then puts the station settings back)"
+        ),
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
@@ -194,11 +203,15 @@ def main() -> None:
     options = parse_args()
     notify_addr = os.getenv("NOTIFY_SOCKET")
 
-    init_logging(debug=options.debug, systemd_run=notify_addr is not None)
+    init_logging(
+        debug=options.debug,
+        systemd_run=notify_addr is not None or options.foreground,
+    )
 
     socket_notify = None
+    child_pid: int | None
     if notify_addr is None:
-        child_pid = os.fork()
+        child_pid = None if options.foreground else os.fork()
     else:
         child_pid = None
         socket_notify = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)

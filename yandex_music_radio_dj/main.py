@@ -13,6 +13,7 @@ from pathlib import Path
 from aiohttp import ClientSession, ClientTimeout
 
 from yandex_music_radio_dj import dj
+from yandex_music_radio_dj.cache import DEFAULT_CACHE, TrackCache
 from yandex_music_radio_dj.ya_player import YandexMusicPlayer
 
 faulthandler.enable()
@@ -37,6 +38,7 @@ def init_logging(*, debug: bool, systemd_run: bool) -> None:
     if debug or systemd_run:
         handler = logging.StreamHandler()
     else:
+        DEFAULT_LOG.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.FileHandler(DEFAULT_LOG)
     handler.setFormatter(formatter)
     handler.setLevel(logging.INFO if not debug else logging.DEBUG)
@@ -113,6 +115,22 @@ def parse_args() -> Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        default=DEFAULT_CACHE,
+        help=(
+            "Database of track analyses and play times (no audio is "
+            "stored): a restart doesn't repeat tracks or analyze them again"
+        ),
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        default=False,
+        help="Don't keep anything on disk between runs",
+    )
+
     return parser.parse_args()
 
 
@@ -122,6 +140,7 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
         timeout=ClientTimeout(sock_read=10, sock_connect=5),
     )
     player = YandexMusicPlayer(options.config, session)
+    cache = None if options.no_cache else TrackCache(options.cache)
     ready = asyncio.Event()
     serve_task = asyncio.create_task(
         dj.serve(
@@ -133,6 +152,7 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
             pool_size=options.tracks,
             effects=options.effects,
             mood_arc=options.mood_arc,
+            cache=cache,
             ready=ready,
         )
     )
@@ -166,6 +186,8 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     finally:
         await player.aclose()
         await session.close()
+        if cache is not None:
+            cache.close()
 
 
 def main() -> None:

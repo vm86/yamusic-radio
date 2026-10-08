@@ -47,8 +47,9 @@ from yandex_music_radio_dj.dj_mix import (
 from yandex_music_radio_dj.request import retry_on_rate_limit
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterable
 
+    from yandex_music_radio_dj.cache import TrackCache
     from yandex_music_radio_dj.ya_player import ExtendTrack, YandexMusicPlayer
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ MAX_EXTRA_TRACKS = 6
 REPLENISH_RETRY_SECONDS = 120
 # Played tracks that can be repeated, oldest forgotten first.
 MAX_PLAYED_REMEMBERED = 500
+# The API lists at most this many tracks, before and after the current one.
+MAX_LISTED = 15
+# Tracks played before a restart that the radio does not pick again.
+CACHED_PLAYED_SKIPPED = 200
 # The next track is chosen and decoded this long before the blend.
 LOOKAHEAD_SECONDS = 40
 # The mix is produced in pieces of this length.
@@ -87,6 +92,54 @@ CLIENT_QUEUE_SIZE = 256
 
 def is_available() -> bool:
     return shutil.which("ffmpeg") is not None
+
+
+@dataclass(frozen=True, slots=True)
+class TrackInfo:
+    """A track as the API shows it."""
+
+    track_id: str
+    title: str
+    artists: tuple[str, ...]
+    bpm: float
+    loudness_db: float
+    duration_seconds: float
+    mood: str
+    # False for the tracks of a forecast: the radio may still change them.
+    decided: bool = True
+
+    @classmethod
+    def of(
+        cls,
+        title: str,
+        analysis: TrackAnalysis,
+        track: ExtendTrack | None,
+        mood: str,
+        *,
+        decided: bool = True,
+    ) -> TrackInfo:
+        return cls(
+            track.track_id if track is not None else "",
+            title,
+            tuple(track.artists_name()) if track is not None else (),
+            round(analysis.bpm, 1),
+            round(analysis.loudness_db, 1),
+            round((analysis.end - analysis.start) / SAMPLE_RATE, 1),
+            mood,
+            decided,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "track_id": self.track_id,
+            "title": self.title,
+            "artists": list(self.artists),
+            "bpm": self.bpm,
+            "loudness_db": self.loudness_db,
+            "duration_seconds": self.duration_seconds,
+            "mood": self.mood,
+            "decided": self.decided,
+        }
 
 
 @dataclass(slots=True)
@@ -121,6 +174,7 @@ class Deck:
     analysis: TrackAnalysis
     beat_matched: bool
     track: ExtendTrack | None = None
+    mood: str = ""
 
 
 async def decode_file(path: Path, speed: float = 1.0) -> Pcm:
@@ -165,8 +219,10 @@ class Radio:
         station_id: str = DEFAULT_STATION,
         pool_size: int = DEFAULT_POOL_SIZE,
         mood_arc: bool = False,
+        cache: TrackCache | None = None,
     ) -> None:
         self._player = player
+        self._cache = cache
         self._session = session
         self._workdir = workdir
         self._station_id = station_id
@@ -185,7 +241,18 @@ class Radio:
         self._mood = ""
         self._saved_settings: tuple[str, str, str] | None = None
         self._playing_id = ""
+        # What the API shows: the track heard now, the ones before it and
+        # the one already decoded to come next.
+        self._now: Deck | None = None
+        self._next: Deck | None = None
+        self._before: deque[TrackInfo] = deque(maxlen=MAX_LISTED)
+        # Only these station moods are played; empty is any.
+        self._allowed_moods: tuple[str, ...] = ()
+        # Tracks that were fetched or played; not picked again. What was
+        # played before this run comes from the cache.
         self._seen: set[str] = set()
+        if cache is not None:
+            self._seen |= cache.recently_played(CACHED_PLAYED_SKIPPED)
         self._slots = Semaphore(PREPARE_CONCURRENCY)
         self._load_lock = Lock()
         self._feedback_tasks: set[Task[None]] = set()
@@ -219,6 +286,133 @@ class Radio:
         )
         self._mood = self._saved_settings[0]
 
+    @property
+    def authorized(self) -> bool:
+        return bool(self._player.is_init)
+
+    def auth_info(self) -> dict[str, object]:
+        """Where to authorize the app, while it has no token yet."""
+        authorized = self.authorized
+        return {
+            "authorized": authorized,
+            "url": None if authorized else self._player.auth_url,
+            "code": None if authorized else self._player.user_code,
+        }
+
+    @property
+    def allowed_moods(self) -> tuple[str, ...]:
+        return self._allowed_moods
+
+    @property
+    def mood(self) -> str:
+        """The mood setting the station has now."""
+        return self._mood
+
+    async def set_allowed_moods(self, moods: Iterable[str]) -> None:
+        """Play only tracks of these moods, or any with none given.
+
+        The station's mood setting is kept on the account: it is changed
+        for as long as the radio runs and put back when it stops.
+        """
+        wanted = tuple(m for m in dj_mix.ALL_MOODS if m in set(moods))
+        if wanted and self._saved_settings is None:
+            await self.start_mood_arc()
+        self._allowed_moods = wanted
+        if not wanted and not self._mood_arc:
+            await self.restore_settings()
+            self._saved_settings = None
+        self._drop_unwanted()
+        log.info("Moods played: %s", ", ".join(wanted) or "any")
+        # Wake up the refill: the pool may be short of tracks now.
+        self._consumed.set()
+
+    def _drop_unwanted(self) -> None:
+        """Forget the pool tracks that were fetched for other moods."""
+        if not self._allowed_moods:
+            return
+        for candidate in list(self._pool):
+            if candidate.mood not in self._allowed_moods:
+                self._pool.remove(candidate)
+                candidate.path.unlink(missing_ok=True)
+
+    def queue(
+        self, before: int = 2, after: int = MAX_LISTED
+    ) -> dict[str, object]:
+        """Describe what was played, what plays now and what comes next."""
+        before = max(0, min(before, MAX_LISTED))
+        after = max(0, min(after, MAX_LISTED))
+        now = None
+        if self._now is not None:
+            now = TrackInfo.of(
+                self._now.title,
+                self._now.analysis,
+                self._now.track,
+                self._now.mood,
+            )
+        return {
+            "previous": [
+                t.to_dict() for t in list(self._before)[-before:] if before
+            ],
+            "now": now.to_dict() if now is not None else None,
+            "next": [t.to_dict() for t in self.upcoming(after)],
+            "moods": self.moods_info(),
+        }
+
+    def moods_info(self) -> dict[str, object]:
+        return {
+            "available": list(dj_mix.ALL_MOODS),
+            "selected": list(self._allowed_moods),
+            "station": self._mood,
+        }
+
+    def upcoming(self, limit: int) -> list[TrackInfo]:
+        """Return the track decoded to come next, then a forecast of the pool.
+
+        The forecast chooses the way the radio does, one track after the
+        other, but the radio decides only ~40 seconds before each blend,
+        by when the pool has changed.
+        """
+        found: list[TrackInfo] = []
+        last = self._next or self._now
+        current = last.analysis if last is not None else None
+        if self._next is not None and limit > 0:
+            found.append(
+                TrackInfo.of(
+                    self._next.title,
+                    self._next.analysis,
+                    self._next.track,
+                    self._next.mood,
+                )
+            )
+        pool = [
+            c
+            for c in self._pool
+            if not self._allowed_moods or c.mood in self._allowed_moods
+        ]
+        history = tuple(self._history)
+        position = self._position
+        while len(found) < limit and pool:
+            entries = [
+                dj_mix.Entry(c.analysis, c.artists, c.mood) for c in pool
+            ]
+            index = dj_mix.choose_next(current, entries, history, position)
+            _, current = dj_mix.step_cost(
+                current, entries[index], history, position
+            )
+            chosen = pool.pop(index)
+            found.append(
+                TrackInfo.of(
+                    chosen.title,
+                    current,
+                    chosen.track,
+                    chosen.mood,
+                    decided=False,
+                )
+            )
+            history = (*history, chosen.artists)[-dj_mix.REPEAT_WINDOW :]
+            position += 1
+        return found
+
     async def _set_mood(self, mood: str) -> None:
         if self._saved_settings is None or mood == self._mood:
             return
@@ -238,14 +432,17 @@ class Radio:
         if somebody else has filled the pool in the meantime.
         """
         async with self._load_lock:
+            self._drop_unwanted()
             if if_empty and self._pool:
                 return 1
             before = len(self._pool)
             empty_batches = 0
-            if self._mood_arc:
+            if self._mood_arc or self._allowed_moods:
                 # Tracks loaded now are played about when the pool has been
-                # worked through: aim for the mood wanted then.
+                # worked through: aim for the mood wanted then, as far as
+                # the moods allowed go.
                 mood = mood or dj_mix.mood_for(self._position + len(self._pool))
+                mood = dj_mix.nearest_mood(mood, self._allowed_moods)
                 await self._set_mood(mood)
             else:
                 mood = ""
@@ -271,7 +468,7 @@ class Radio:
         size = size or self._pool_size
         while len(self._pool) < size:
             wanted = size - len(self._pool)
-            if self._mood_arc:
+            if self._mood_arc or self._allowed_moods:
                 # A few at a time: each round has its own mood.
                 wanted = min(wanted, EXTRA_TRACKS)
             if not await self._load(wanted):
@@ -301,15 +498,18 @@ class Radio:
             path = self._workdir / f"{track.track_id}.{track.codec}"
             try:
                 await self._download(track, path)
-                pcm = await decode_file(path)
-                analysis = await asyncio.to_thread(dj_mix.analyze, pcm)
+                analysis = self._cached_analysis(track)
+                if analysis is None:
+                    pcm = await decode_file(path)
+                    analysis = await asyncio.to_thread(dj_mix.analyze, pcm)
+                    del pcm
+                    self._store_analysis(track, title, analysis)
             except CancelledError:
                 raise
             except Exception:
                 log.exception("Skip %s", title)
                 path.unlink(missing_ok=True)
                 return
-            del pcm
         log.info(
             "Ready: %s (%.1f BPM, %.1f dB)",
             title,
@@ -327,6 +527,22 @@ class Radio:
             )
         )
         self._added.set()
+
+    def _cached_analysis(self, track: ExtendTrack) -> TrackAnalysis | None:
+        if self._cache is None:
+            return None
+        analysis = self._cache.get_analysis(track.track_id, track.codec)
+        if analysis is not None:
+            log.debug("Analysis of %s is cached", track.track_id)
+        return analysis
+
+    def _store_analysis(
+        self, track: ExtendTrack, title: str, analysis: TrackAnalysis
+    ) -> None:
+        if self._cache is not None:
+            self._cache.put_analysis(
+                track.track_id, track.codec, title, analysis
+            )
 
     async def _download(self, track: ExtendTrack, path: Path) -> None:
         links = await self._player.get_download_links(
@@ -368,6 +584,7 @@ class Radio:
         """
         extra = 0
         while True:
+            self._drop_unwanted()
             if not self._pool and not await self._load(
                 EXTRA_TRACKS, if_empty=True
             ):
@@ -423,6 +640,8 @@ class Radio:
         if track is None:
             return
         self._playing_id = track.track_id
+        if self._cache is not None:
+            self._cache.mark_played(track.track_id, track.codec)
         self._played[track.track_id] = Played(
             track, candidate.title, candidate.analysis, candidate.artists
         )
@@ -450,16 +669,31 @@ class Radio:
             analysis.bpm,
             ", beat-matched" if speed else "",
         )
-        return Deck(
+        deck = Deck(
             candidate.title,
             pcm,
             analysis,
             beat_matched=bool(speed),
             track=candidate.track,
+            mood=candidate.mood,
         )
+        self._next = deck
+        return deck
 
     def started(self, deck: Deck) -> None:
         """Tell the station the track has begun to be heard."""
+        if self._now is not None:
+            self._before.append(
+                TrackInfo.of(
+                    self._now.title,
+                    self._now.analysis,
+                    self._now.track,
+                    self._now.mood,
+                )
+            )
+        self._now = deck
+        if self._next is deck:
+            self._next = None
         self._send_feedback(deck, "trackStarted", 0.0)
 
     def finished(self, deck: Deck) -> None:
@@ -604,7 +838,77 @@ def icy_block(title: str) -> bytes:
     return bytes([(len(text) + padding) // 16]) + text + bytes(padding)
 
 
-def make_app(hub: Broadcaster) -> web.Application:
+def _count(request: web.Request, name: str, default: int) -> int:
+    try:
+        value = int(request.query.get(name, default))
+    except ValueError:
+        raise web.HTTPBadRequest(text=f"{name} must be a number") from None
+    if value < 0:
+        raise web.HTTPBadRequest(text=f"{name} must not be negative")
+    return min(value, MAX_LISTED)
+
+
+async def _json_body(request: web.Request) -> object:
+    try:
+        return await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest(text="body must be JSON") from None
+
+
+def _parse_moods(body: object) -> list[str]:
+    moods = body.get("moods") if isinstance(body, dict) else None
+    if not isinstance(moods, list) or not all(
+        isinstance(m, str) for m in moods
+    ):
+        raise web.HTTPBadRequest(text='expected {"moods": [...]}')
+    unknown = sorted(set(moods) - set(dj_mix.ALL_MOODS))
+    if unknown:
+        raise web.HTTPBadRequest(
+            text=f"unknown moods {unknown}, available: {list(dj_mix.ALL_MOODS)}"
+        )
+    return moods
+
+
+def add_api(app: web.Application, radio: Radio) -> None:
+    """Add the REST API to the app, under /api."""
+
+    async def queue(request: web.Request) -> web.Response:
+        return web.json_response(
+            radio.queue(
+                _count(request, "previous", 2), _count(request, "next", 15)
+            )
+        )
+
+    async def auth(_: web.Request) -> web.Response:
+        return web.json_response(radio.auth_info())
+
+    def need_token() -> None:
+        # The moods are a setting of the Yandex account.
+        if not radio.authorized:
+            raise web.HTTPServiceUnavailable(text="not authorized yet")
+
+    async def get_moods(_: web.Request) -> web.Response:
+        return web.json_response(radio.moods_info())
+
+    async def put_moods(request: web.Request) -> web.Response:
+        need_token()
+        moods = _parse_moods(await _json_body(request))
+        await radio.set_allowed_moods(moods)
+        return web.json_response(radio.moods_info())
+
+    async def delete_moods(_: web.Request) -> web.Response:
+        need_token()
+        await radio.set_allowed_moods([])
+        return web.json_response(radio.moods_info())
+
+    app.router.add_get("/api/auth", auth)
+    app.router.add_get("/api/queue", queue)
+    app.router.add_get("/api/moods", get_moods)
+    app.router.add_put("/api/moods", put_moods)
+    app.router.add_delete("/api/moods", delete_moods)
+
+
+def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
     async def index(_: web.Request) -> web.Response:
         return web.Response(
             text=f"{ICY_NAME}: stream is at /stream\nNow playing: {hub.title}\n"
@@ -650,6 +954,8 @@ def make_app(hub: Broadcaster) -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
     app.router.add_get("/stream", stream)
+    if radio is not None:
+        add_api(app, radio)
     return app
 
 
@@ -721,13 +1027,14 @@ async def serve(
     pool_size: int = DEFAULT_POOL_SIZE,
     effects: str = DEFAULT_EFFECTS,
     mood_arc: bool = False,
+    cache: TrackCache | None = None,
     ready: Event | None = None,
 ) -> None:
-    """Prepare the first tracks, then stream until cancelled."""
-    # Waiting for the user to authorize the app.
-    while not player.is_init:  # noqa: ASYNC110
-        await sleep(2)
+    """Serve the stream and the API, then mix until cancelled.
 
+    The server is up before the app is authorized, so that /api/auth can
+    tell where to do it.
+    """
     with tempfile.TemporaryDirectory(prefix="yamusic-dj-") as workdir:
         radio = Radio(
             player,
@@ -736,41 +1043,34 @@ async def serve(
             station_id=station_id,
             pool_size=pool_size,
             mood_arc=mood_arc,
+            cache=cache,
         )
+        hub = Broadcaster()
+        runner = web.AppRunner(make_app(hub, radio), access_log=None)
+        await runner.setup()
+        await web.TCPSite(runner, host, port).start()
+        log.info("Streaming at http://%s:%d/stream", host, port)
+        if ready is not None:
+            ready.set()
         try:
+            # Waiting for the user to authorize the app.
+            while not player.is_init:  # noqa: ASYNC110
+                await sleep(2)
             if mood_arc:
                 await radio.start_mood_arc()
             log.info("Preparing %d tracks from %s...", pool_size, station_id)
             await radio.fill()
             if not radio.pool:
                 raise RuntimeError("The station gave no playable tracks")
-            await _stream(radio, host, port, effects, ready)
+            refill = create_task(radio.keep_filled(), name="dj-refill")
+            try:
+                await _encode_loop(radio, hub, EFFECT_LEVELS[effects])
+            finally:
+                refill.cancel()
+                with contextlib.suppress(CancelledError):
+                    await refill
         finally:
             # The mood is a setting of the account: leave it as it was.
             with contextlib.suppress(Exception):
                 await radio.restore_settings()
-
-
-async def _stream(
-    radio: Radio,
-    host: str,
-    port: int,
-    effects: str,
-    ready: Event | None,
-) -> None:
-    hub = Broadcaster()
-    runner = web.AppRunner(make_app(hub), access_log=None)
-    await runner.setup()
-    await web.TCPSite(runner, host, port).start()
-    log.info("Streaming at http://%s:%d/stream", host, port)
-    if ready is not None:
-        ready.set()
-
-    refill = create_task(radio.keep_filled(), name="dj-refill")
-    try:
-        await _encode_loop(radio, hub, EFFECT_LEVELS[effects])
-    finally:
-        refill.cancel()
-        with contextlib.suppress(CancelledError):
-            await refill
-        await runner.cleanup()
+            await runner.cleanup()

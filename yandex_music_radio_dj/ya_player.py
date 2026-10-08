@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import uuid
 from asyncio import CancelledError, Semaphore, gather, sleep
@@ -37,6 +38,8 @@ log = logging.getLogger(__name__)
 # "lossless" is served as FLAC (and AAC) in an MP4 container: the plain flac
 # and aac codecs are not offered for it, so the *-mp4 ones must be requested.
 CODECS = "flac,aac,he-aac,mp3"
+# Only the owner may read the settings: they hold the OAuth token.
+SETTINGS_MODE = 0o600
 LOSSLESS_CODECS = "flac,flac-mp4,aac,aac-mp4,he-aac,he-aac-mp4,mp3"
 
 
@@ -130,7 +133,7 @@ class YandexMusicPlayer(ClientAsync):
             }
             self.__last_track = self.__settings["last_track"]
         except FileNotFoundError:
-            self.__settings = self._default_settings
+            self.__settings = {**self._default_settings}
             self.save_settings()
 
         super().__init__(
@@ -196,7 +199,18 @@ class YandexMusicPlayer(ClientAsync):
         return self.__user_code
 
     def save_settings(self) -> None:
-        self.__settings_path.write_text(json.dumps(self.__settings))
+        """Write the settings, which hold the token, for the owner only."""
+        path = self.__settings_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A new file, so that the token is never readable by others, not
+        # even for a moment, and a crash can't leave half of it behind.
+        temp = path.with_name(f"{path.name}.tmp")
+        descriptor = os.open(
+            temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, SETTINGS_MODE
+        )
+        with os.fdopen(descriptor, "w") as file:
+            file.write(json.dumps(self.__settings))
+        temp.replace(path)
 
     @property
     def config(self) -> dict[str, Any]:

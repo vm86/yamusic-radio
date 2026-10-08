@@ -121,6 +121,8 @@ LOOKAHEAD_BEAM = 8
 # The station mood wanted at each point of the arc, calm to lively, and the
 # cost of a track that was picked for another mood (per step apart).
 MOODS = ("calm", "fun", "active")
+# Every mood the station can be set to (quietest first); "all" is no choice.
+ALL_MOODS = ("sad", "calm", "fun", "active")
 MOOD_CALM_BELOW = 0.3
 MOOD_FUN_BELOW = 0.5
 MOOD_COST = 2.0
@@ -770,6 +772,19 @@ def mood_for(position: int) -> str:
     if target < MOOD_CALM_BELOW:
         return "calm"
     return "fun" if target < MOOD_FUN_BELOW else "active"
+
+
+def nearest_mood(wanted: str, allowed: Sequence[str]) -> str:
+    """Return the mood among the allowed ones that is closest to wanted.
+
+    Everything is allowed when the list is empty.
+    """
+    if not allowed or wanted in allowed:
+        return wanted
+    if wanted not in ALL_MOODS:
+        return allowed[0]
+    place = ALL_MOODS.index(wanted)
+    return min(allowed, key=lambda mood: abs(ALL_MOODS.index(mood) - place))
 
 
 def mood_cost(wanted: str, got: str) -> float:

@@ -11,6 +11,8 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from yandex_music_radio_dj.cache import TrackCache
+
 np = pytest.importorskip("numpy")
 
 from yandex_music_radio_dj import dj, dj_mix  # noqa: E402
@@ -632,6 +634,9 @@ class FakePlayer:
         self.requests = 0
         self.feedback: list[tuple[str, str, float]] = []
         self.settings: list[tuple[str, str, str]] = []
+        self.is_init = True
+        self.auth_url: str | None = None
+        self.user_code: str | None = None
 
     async def station_batch(
         self, station_id: str, *, exclude_track_ids: set[str]
@@ -670,9 +675,12 @@ def make_radio(
     bpms: dict[str, float],
     *,
     mood_arc: bool = False,
+    cache: TrackCache | None = None,
 ) -> dj.Radio:
     """Make a radio whose tracks are 200 s of silence with a given tempo."""
-    radio = dj.Radio(player, None, tmp_path, pool_size=4, mood_arc=mood_arc)
+    radio = dj.Radio(
+        player, None, tmp_path, pool_size=4, mood_arc=mood_arc, cache=cache
+    )
 
     async def download(track: FakeTrack, path: Path) -> None:
         path.write_bytes(b"x")
@@ -873,3 +881,186 @@ async def test_without_mood_arc_the_settings_are_left_alone(
     await radio.restore_settings()
 
     assert player.settings == []
+
+
+@pytest.mark.asyncio
+async def test_played_tracks_are_not_picked_again_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    cache = track_cache
+    tracks = [FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]
+    radio = make_radio(
+        tmp_path, monkeypatch, FakePlayer([tracks]), {}, cache=cache
+    )
+    await radio.fill(2)
+    for name in "abc":  # as _prepare does
+        cache.put_analysis(name, "mp3", name, track_analysis(120))
+    first = await radio.next_deck(None)
+
+    restarted = make_radio(
+        tmp_path,
+        monkeypatch,
+        FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
+        {},
+        cache=cache,
+    )
+    await restarted.fill(3)
+
+    assert first.title == "a"
+    assert "a" not in [c.title for c in restarted.pool]
+
+
+@pytest.mark.asyncio
+async def test_cached_analysis_skips_decoding_and_analyzing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    cache = track_cache
+    radio = dj.Radio(FakePlayer([]), None, tmp_path, pool_size=1, cache=cache)
+    decoded: list[Path] = []
+
+    async def download(track: FakeTrack, path: Path) -> None:
+        path.write_bytes(b"x")
+
+    async def decode(path: Path, speed: float = 1.0) -> np.ndarray:
+        decoded.append(path)
+        return np.zeros((SR, CHANNELS), np.float32)
+
+    monkeypatch.setattr(radio, "_download", download)
+    monkeypatch.setattr(dj, "decode_file", decode)
+    monkeypatch.setattr(dj_mix, "analyze", lambda _pcm: track_analysis(100))
+
+    await radio._prepare(FakeTrack("a"))  # analyzed and stored
+    await radio._prepare(FakeTrack("a"))  # served from the cache
+
+    assert len(decoded) == 1
+    assert [c.analysis.bpm for c in radio.pool] == [100, 100]
+
+
+def test_nearest_mood_stays_within_the_allowed_ones() -> None:
+    assert dj_mix.nearest_mood("fun", []) == "fun"
+    assert dj_mix.nearest_mood("fun", ["calm", "fun"]) == "fun"
+    assert dj_mix.nearest_mood("active", ["sad", "calm"]) == "calm"
+    assert dj_mix.nearest_mood("fun", ["calm", "active"]) == "calm"  # a tie
+
+
+@pytest.mark.asyncio
+async def test_only_the_allowed_moods_are_fetched_and_played(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = [FakeTrack(f"t{n}") for n in range(30)]
+    player = FakePlayer([names[i : i + 3] for i in range(0, 30, 3)])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(4)  # tracks of the station's own mood first
+    assert {c.mood for c in radio.pool} == {""}
+
+    await radio.set_allowed_moods(["active", "calm", "calm"])
+
+    assert radio.allowed_moods == ("calm", "active")
+    assert radio.pool == []  # the others were dropped
+    await radio.fill(4)
+    deck = await radio.next_deck(None)
+    assert {c.mood for c in radio.pool} <= {"calm", "active"}
+    assert deck.mood in {"calm", "active"}
+    assert {s[0] for s in player.settings} <= {"calm", "active", "all"}
+
+    await radio.set_allowed_moods([])
+    assert player.settings[-1][0] == "all"  # the account is as it was
+
+
+@pytest.mark.asyncio
+async def test_queue_shows_previous_now_and_next_tracks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack(n) for n in "abcdefg"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(6)
+    assert radio.queue()["now"] is None
+
+    played = []
+    for _ in range(4):
+        deck = await radio.next_deck(played[-1].analysis if played else None)
+        radio.started(deck)
+        played.append(deck)
+    deck = await radio.next_deck(played[-1].analysis)  # decoded, not begun
+
+    queue = radio.queue(before=2, after=15)
+
+    assert [t["title"] for t in queue["previous"]] == [
+        played[1].title,
+        played[2].title,
+    ]
+    assert queue["now"]["title"] == played[3].title
+    nxt = queue["next"]
+    assert nxt[0]["title"] == deck.title
+    assert nxt[0]["decided"] is True
+    assert all(not t["decided"] for t in nxt[1:])
+    titles = [p.title for p in played] + [deck.title]
+    assert not {t["title"] for t in nxt} & set(titles[:-1])
+    assert len(radio.queue(after=1)["next"]) == 1
+    assert len(radio.queue(before=0)["previous"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_rest_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    player = FakePlayer([[FakeTrack(n) for n in "abcd"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(4)
+    deck = await radio.next_deck(None)
+    radio.started(deck)
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        queue = await (await client.get("/api/queue?next=2")).json()
+        assert queue["now"]["title"] == deck.title
+        assert len(queue["next"]) == 2
+        assert (await client.get("/api/queue?next=x")).status == 400
+
+        moods = await (await client.get("/api/moods")).json()
+        assert moods["available"] == ["sad", "calm", "fun", "active"]
+        assert moods["selected"] == []
+
+        reply = await client.put("/api/moods", json={"moods": ["calm", "fun"]})
+        assert (await reply.json())["selected"] == ["calm", "fun"]
+        bad = await client.put("/api/moods", json={"moods": ["angry"]})
+        assert bad.status == 400
+        assert (await client.put("/api/moods", data="nope")).status == 400
+        assert (await client.put("/api/moods", json=[])).status == 400
+        assert radio.allowed_moods == ("calm", "fun")
+
+        reply = await client.delete("/api/moods")
+        assert (await reply.json())["selected"] == []
+
+
+@pytest.mark.asyncio
+async def test_api_tells_where_to_authorize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    player = FakePlayer([])
+    player.is_init = False
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        waiting = await (await client.get("/api/auth")).json()
+        assert waiting == {"authorized": False, "url": None, "code": None}
+
+        player.auth_url = "https://ya.example/device"
+        player.user_code = "ABCD1234"
+        waiting = await (await client.get("/api/auth")).json()
+        assert waiting["url"] == "https://ya.example/device"
+        assert waiting["code"] == "ABCD1234"
+        # The account's settings can't be changed yet.
+        reply = await client.put("/api/moods", json={"moods": ["calm"]})
+        assert reply.status == 503
+        assert (await client.delete("/api/moods")).status == 503
+        assert (await client.get("/api/queue")).status == 200
+
+        player.is_init = True
+        done = await (await client.get("/api/auth")).json()
+        assert done == {"authorized": True, "url": None, "code": None}

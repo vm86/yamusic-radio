@@ -1,8 +1,8 @@
 """Disk cache of what the radio has learned about tracks.
 
 Only metadata is stored, never audio: the analysis of a track (so a track
-that comes up again is not decoded and analyzed once more) and when it was
-last played (so a restart doesn't repeat what was just heard).
+that comes up again is not decoded and analyzed once more), its genre and
+when it was last played (so a restart doesn't repeat what was just heard).
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tracks (
     codec TEXT NOT NULL,
     title TEXT NOT NULL,
     analysis TEXT NOT NULL,
+    genre TEXT NOT NULL DEFAULT '',
     played_at REAL,
     used_at REAL NOT NULL,
     PRIMARY KEY (track_id, codec)
@@ -44,6 +45,14 @@ class TrackCache:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.executescript(_SCHEMA)
+        columns = {
+            row[1] for row in self._db.execute("PRAGMA table_info(tracks)")
+        }
+        if "genre" not in columns:
+            # A cache made before the genre was kept.
+            self._db.execute(
+                "ALTER TABLE tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''"
+            )
         self._db.commit()
 
     def close(self) -> None:
@@ -74,13 +83,15 @@ class TrackCache:
         codec: str,
         title: str,
         analysis: TrackAnalysis,
+        genre: str = "",
     ) -> None:
         now = time.time()
         self._db.execute(
-            "INSERT INTO tracks (track_id, codec, title, analysis, used_at) "
-            "VALUES (?, ?, ?, ?, ?) ON CONFLICT (track_id, codec) DO UPDATE "
+            "INSERT INTO tracks (track_id, codec, title, analysis, genre, "
+            "used_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (track_id, codec) DO UPDATE "
             "SET title = excluded.title, analysis = excluded.analysis, "
-            "used_at = excluded.used_at",
+            "genre = excluded.genre, used_at = excluded.used_at",
             (
                 track_id,
                 codec,
@@ -88,11 +99,28 @@ class TrackCache:
                 json.dumps(
                     {**dataclasses.asdict(analysis), "key_by": key_detector()}
                 ),
+                genre,
                 now,
             ),
         )
         self._prune()
         self._db.commit()
+
+    def set_genre(self, track_id: str, codec: str, genre: str) -> None:
+        """Keep the genre of a track that is already in the cache."""
+        self._db.execute(
+            "UPDATE tracks SET genre = ? WHERE track_id = ? AND codec = ?",
+            (genre, track_id, codec),
+        )
+        self._db.commit()
+
+    def get_genre(self, track_id: str, codec: str) -> str | None:
+        """Return the genre kept for a track, None if it isn't cached."""
+        row = self._db.execute(
+            "SELECT genre FROM tracks WHERE track_id = ? AND codec = ?",
+            (track_id, codec),
+        ).fetchone()
+        return None if row is None else str(row[0])
 
     def mark_played(self, track_id: str, codec: str) -> None:
         now = time.time()

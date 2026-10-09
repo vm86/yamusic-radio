@@ -618,7 +618,8 @@ def test_choice_is_the_start_of_the_best_queue() -> None:
 class FakeTrack:
     """The bits of ExtendTrack that the radio uses."""
 
-    def __init__(self, name: str, artist: str = "") -> None:
+    def __init__(self, name: str, artist: str = "", genre: str = "") -> None:
+        self.genre = genre
         self.track_id = name
         self.title = name
         self.codec = "mp3"
@@ -1282,3 +1283,34 @@ def test_energy_arc_is_not_given_up_for_the_key() -> None:
     assert dj_mix.ENERGY_ARC_COST * 0.25 > dj_mix.KEY_COST_SCALE * (
         dj_mix.KEY_DIAGONAL_COST
     )
+
+
+@pytest.mark.asyncio
+async def test_genre_is_kept_in_the_cache_not_in_the_api(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_cache: TrackCache,
+) -> None:
+    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+
+    async def download(track: FakeTrack, path: Path) -> None:
+        path.write_bytes(b"x")
+
+    async def decode(path: Path, speed: float = 1.0) -> np.ndarray:
+        return np.zeros((SR, CHANNELS), np.float32)
+
+    monkeypatch.setattr(radio, "_download", download)
+    monkeypatch.setattr(dj, "decode_file", decode)
+    monkeypatch.setattr(dj_mix, "analyze", lambda _: track_analysis(120))
+
+    await radio._prepare(FakeTrack("a", genre="house"))
+    assert track_cache.get_genre("a", "mp3") == "house"
+
+    # Analyzed before the genre was known: the genre is added to the row.
+    track_cache.put_analysis("b", "mp3", "b", track_analysis(120))
+    assert track_cache.get_genre("b", "mp3") == ""
+    await radio._prepare(FakeTrack("b", genre="techno"))
+    assert track_cache.get_genre("b", "mp3") == "techno"
+
+    info = dj.TrackInfo.of("a", track_analysis(120), None, "").to_dict()
+    assert "genre" not in info

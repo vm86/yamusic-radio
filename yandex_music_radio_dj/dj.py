@@ -574,6 +574,7 @@ class Radio:
                     analysis = await asyncio.to_thread(dj_mix.analyze, pcm)
                     del pcm
                     self._store_analysis(track, title, analysis)
+                self._store_genre(track)
             except CancelledError:
                 raise
             except Exception:
@@ -614,8 +615,13 @@ class Radio:
     ) -> None:
         if self._cache is not None:
             self._cache.put_analysis(
-                track.track_id, track.codec, title, analysis
+                track.track_id, track.codec, title, analysis, track.genre
             )
+
+    def _store_genre(self, track: ExtendTrack) -> None:
+        """Keep the genre of a track whose analysis was cached before."""
+        if self._cache is not None and track.genre:
+            self._cache.set_genre(track.track_id, track.codec, track.genre)
 
     async def _download(self, track: ExtendTrack, path: Path) -> None:
         links = await self._player.get_download_links(

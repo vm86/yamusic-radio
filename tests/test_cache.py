@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import TYPE_CHECKING
 
 from yandex_music_radio_dj.cache import MAX_ROWS, TrackCache
@@ -97,3 +98,33 @@ def test_analysis_with_an_unknown_key_detector_is_analyzed_again(
             "UPDATE tracks SET analysis = ?", (json.dumps(stored),)
         )
         assert cache.get_analysis("1", "mp3") is None
+
+
+def test_genre_is_stored_and_updated(track_cache: TrackCache) -> None:
+    cache = track_cache
+    assert cache.get_genre("1", "mp3") is None
+
+    cache.put_analysis("1", "mp3", "A - B", ANALYSIS, "house")
+    assert cache.get_genre("1", "mp3") == "house"
+
+    cache.set_genre("1", "mp3", "techno")
+    assert cache.get_genre("1", "mp3") == "techno"
+    assert cache.get_genre("1", "flac") is None
+
+
+def test_cache_without_the_genre_column_is_upgraded(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE tracks (track_id TEXT NOT NULL, codec TEXT NOT NULL,"
+        " title TEXT NOT NULL, analysis TEXT NOT NULL, played_at REAL,"
+        " used_at REAL NOT NULL, PRIMARY KEY (track_id, codec));"
+        "INSERT INTO tracks VALUES ('1', 'mp3', 'A - B', '{}', NULL, 1.0);"
+    )
+    db.commit()
+    db.close()
+
+    cache = TrackCache(path)
+
+    assert cache.get_genre("1", "mp3") == ""
+    cache.close()

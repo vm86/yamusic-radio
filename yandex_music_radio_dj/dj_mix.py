@@ -147,11 +147,109 @@ class TrackAnalysis:
     # track, which a blend should keep out of.
     intro_end: int = -1
     outro_start: int = -1
+    # Musical key: 0-11 is a major key (C, C#, ... B), 12-23 the minor key
+    # with tonic 0-11; -1 when it couldn't be told.
+    key: int = -1
+
+    @property
+    def camelot(self) -> str:
+        """Camelot Wheel code of the key (8B, 5A, ...), "" when unknown."""
+        return camelot_code(self.key)
+
+    @property
+    def key_name(self) -> str:
+        """Key as musicians write it (C major, F# minor), "" when unknown."""
+        return key_name(self.key)
 
     @property
     def beat_period(self) -> float:
         """Samples per beat."""
         return SAMPLE_RATE * 60.0 / self.bpm
+
+
+# Key detection: the pitch-class profile of the track (chroma) is compared
+# with the Krumhansl-Kessler major and minor profiles.
+KEY_FRAME = 8192
+KEY_HOP = 16384
+KEY_MIN_HZ = 110.0
+KEY_MAX_HZ = 2000.0
+# Frames quieter than this share of the loudest one are not looked at.
+KEY_QUIET_RATIO = 0.1
+# Below this correlation the track has no tonal centre worth a label.
+MIN_KEY_CONFIDENCE = 0.3
+PITCH_CLASSES = 12
+KEYS = 2 * PITCH_CLASSES
+NOTES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+_MAJOR_PROFILE = np.array(
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+)
+_MINOR_PROFILE = np.array(
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+)
+
+
+def camelot_code(key: int) -> str:
+    """Camelot Wheel code of a key as numbered in TrackAnalysis.key."""
+    if not 0 <= key < KEYS:
+        return ""
+    minor = key >= PITCH_CLASSES
+    # The relative major of a minor key is a minor third above its tonic;
+    # going up a fifth moves one step round the wheel, C major being 8B.
+    major_tonic = (key + 3) % PITCH_CLASSES if minor else key
+    number = (major_tonic * 7 + 7) % PITCH_CLASSES + 1
+    return f"{number}{'A' if minor else 'B'}"
+
+
+def key_name(key: int) -> str:
+    if not 0 <= key < KEYS:
+        return ""
+    mode = "minor" if key >= PITCH_CLASSES else "major"
+    return f"{NOTES[key % PITCH_CLASSES]} {mode}"
+
+
+def chroma(mono: Pcm) -> npt.NDArray[np.float64]:
+    """Energy of the track at each of the 12 pitch classes (C = 0)."""
+    freqs = np.fft.rfftfreq(KEY_FRAME, 1 / SAMPLE_RATE)
+    usable = (freqs >= KEY_MIN_HZ) & (freqs <= KEY_MAX_HZ)
+    pitch_class = (
+        np.round(12 * np.log2(freqs[usable] / 440.0) + 9).astype(int) % 12
+    )
+    starts = np.arange(0, len(mono) - KEY_FRAME, KEY_HOP)
+    if not len(starts):
+        return np.zeros(12)
+    window = np.hanning(KEY_FRAME).astype(np.float32)
+    frames = np.stack([mono[i : i + KEY_FRAME] * window for i in starts])
+    # The square root keeps a loud bass note from drowning the harmony.
+    magnitude = np.sqrt(np.abs(np.fft.rfft(frames, axis=1))[:, usable])
+    per_frame = np.stack(
+        [
+            np.bincount(pitch_class, weights=row, minlength=12)
+            for row in magnitude
+        ]
+    )
+    totals = per_frame.sum(axis=1)
+    per_frame = per_frame[totals > KEY_QUIET_RATIO * totals.max()]
+    # Every frame counts the same, whatever its loudness.
+    per_frame = per_frame / per_frame.sum(axis=1, keepdims=True)
+    total: npt.NDArray[np.float64] = per_frame.sum(axis=0)
+    return total
+
+
+def estimate_key(mono: Pcm) -> int:
+    """Key of the track (see TrackAnalysis.key), -1 if there is none."""
+    profile = chroma(mono)
+    if not profile.any():
+        return -1
+    best, best_score = -1, MIN_KEY_CONFIDENCE
+    for offset, reference in (
+        (0, _MAJOR_PROFILE),
+        (PITCH_CLASSES, _MINOR_PROFILE),
+    ):
+        for tonic in range(12):
+            score = float(np.corrcoef(profile, np.roll(reference, tonic))[0, 1])
+            if score > best_score:
+                best, best_score = offset + tonic, score
+    return best
 
 
 def onset_envelope(mono: Pcm) -> npt.NDArray[np.float32]:
@@ -321,6 +419,7 @@ def analyze(pcm: Pcm) -> TrackAnalysis:
         loudness_db=20 * log10(rms),
         intro_end=intro_end,
         outro_start=outro_start,
+        key=estimate_key(mono),
     )
 
 

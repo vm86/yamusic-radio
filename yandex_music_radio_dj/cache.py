@@ -57,7 +57,11 @@ class TrackCache:
         if row is None:
             return None
         try:
-            return TrackAnalysis(**json.loads(row[0]))
+            fields = json.loads(row[0])
+            if "key" not in fields:
+                # Stored before the key was analyzed: analyze again.
+                return None
+            return TrackAnalysis(**fields)
         except (TypeError, ValueError):
             # Written by another version of the program: analyze again.
             log.warning("Ignoring cached analysis of %s", track_id)

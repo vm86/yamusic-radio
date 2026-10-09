@@ -108,6 +108,9 @@ class TrackInfo:
     loudness_db: float
     duration_seconds: float
     mood: str
+    # Camelot Wheel code and the name of the key; "" when it isn't known.
+    camelot: str = ""
+    key: str = ""
     # False for the tracks of a forecast: the radio may still change them.
     decided: bool = True
 
@@ -129,6 +132,8 @@ class TrackInfo:
             round(analysis.loudness_db, 1),
             round((analysis.end - analysis.start) / SAMPLE_RATE, 1),
             mood,
+            analysis.camelot,
+            analysis.key_name,
             decided,
         )
 
@@ -141,6 +146,8 @@ class TrackInfo:
             "loudness_db": self.loudness_db,
             "duration_seconds": self.duration_seconds,
             "mood": self.mood,
+            "camelot": self.camelot,
+            "key": self.key,
             "decided": self.decided,
         }
 
@@ -524,10 +531,13 @@ class Radio:
                 path.unlink(missing_ok=True)
                 return
         log.info(
-            "Ready: %s (%.1f BPM, %.1f dB)",
+            "Ready: %s (%.1f BPM, %.1f dB, key %s)",
             title,
             analysis.bpm,
             analysis.loudness_db,
+            f"{analysis.camelot} {analysis.key_name}"
+            if analysis.camelot
+            else "?",
         )
         self._pool.append(
             Candidate(

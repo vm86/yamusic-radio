@@ -216,6 +216,12 @@ main {
   font: var(--md-sys-typescale-label-large);
   letter-spacing: var(--md-sys-typescale-label-large-tracking);
 }
+.assist.key {
+  border-color: hsl(var(--key-hue) 60% 50%);
+  background: hsl(var(--key-hue) 60% 50% / 0.18);
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
+}
 .progress { display: grid; gap: 4px; }
 .bar { height: 4px; border-radius: var(--md-sys-shape-corner-full); background: var(--md-sys-color-secondary-container); overflow: hidden; }
 .bar > i { display: block; height: 100%; width: 0; background: var(--md-sys-color-primary); border-radius: var(--md-sys-shape-corner-full); transition: width 0.4s linear; }
@@ -521,6 +527,17 @@ try {
 /* Rendering */
 function moodName(mood) { return MOODS[mood] || ""; }
 
+/* Camelot Wheel: the 12 numbers are hues round the wheel, so keys that mix
+   well (same number, +-1, A/B swap) look alike. */
+function keyChip(track, cls) {
+  const hue = ((parseInt(track.camelot, 10) - 1) * 30) % 360;
+  return el("span", {
+    class: `${cls} key`,
+    title: `${track.key} (Camelot ${track.camelot})`,
+    style: `--key-hue: ${hue}`,
+  }, track.camelot);
+}
+
 function renderNow(now) {
   $("title").textContent = now ? now.title : "Ничего не играет";
   $("artists").textContent = now
@@ -530,6 +547,7 @@ function renderNow(now) {
   facts.replaceChildren();
   if (now) {
     if (now.bpm) facts.append(el("span", { class: "assist" }, `${Math.round(now.bpm)} BPM`));
+    if (now.camelot) facts.append(keyChip(now, "assist"));
     if (moodName(now.mood)) facts.append(el("span", { class: "assist" }, moodName(now.mood)));
     facts.append(el("span", { class: "assist" }, `${Math.round(now.loudness_db)} дБ`));
   }
@@ -565,7 +583,7 @@ function row(track, index, kind) {
     { class: `item ${kind}` },
     el("div", { class: "leading" }, String(index)),
     el("div", { class: "text" }, el("div", { class: "t", title: track.title }, track.title), el("div", { class: "s" }, sub || "—")),
-    el("div", { class: "trail" }, track.bpm ? `${Math.round(track.bpm)} BPM` : "", el("br"), clock(track.duration_seconds)),
+    el("div", { class: "trail" }, [track.camelot, track.bpm ? `${Math.round(track.bpm)} BPM` : ""].filter(Boolean).join(" · "), el("br"), clock(track.duration_seconds)),
   );
 }
 

@@ -1070,3 +1070,57 @@ async def test_api_tells_where_to_authorize(
         player.is_init = True
         done = await (await client.get("/api/auth")).json()
         assert done == {"authorized": True, "url": None, "code": None}
+
+
+def chord_track(tonic: int, *, minor: bool, seconds: float = 40) -> np.ndarray:
+    """I, IV and V triads (with overtones) in a given key, tonic-heavy."""
+    third = 3 if minor else 4
+    t = np.arange(int(seconds * SR)) / SR
+    out = np.zeros_like(t)
+    steps = (0, 5, 0, 7, 0, 0)
+    for degree, step in enumerate(steps):
+        lo, hi = (
+            degree * len(t) // len(steps),
+            (degree + 1) * len(t) // len(steps),
+        )
+        for interval in (0, third, 7):
+            midi = 48 + tonic + step + interval
+            freq = 440 * 2 ** ((midi - 69) / 12)
+            for harmonic, gain in ((1, 1.0), (2, 0.5), (4, 0.25)):
+                out[lo:hi] += gain * np.sin(
+                    2 * np.pi * freq * harmonic * t[lo:hi]
+                )
+    return (0.3 * out / np.abs(out).max()).astype(np.float32)
+
+
+@pytest.mark.parametrize(
+    ("tonic", "minor", "camelot"),
+    [(0, False, "8B"), (9, True, "8A"), (7, False, "9B"), (4, True, "9A")],
+)
+def test_estimate_key_finds_the_key(
+    tonic: int,
+    minor: bool,  # noqa: FBT001
+    camelot: str,
+) -> None:
+    key = dj_mix.estimate_key(chord_track(tonic, minor=minor))
+
+    assert key == tonic + (12 if minor else 0)
+    assert dj_mix.camelot_code(key) == camelot
+
+
+def test_estimate_key_of_noise_is_unknown() -> None:
+    noise = np.random.default_rng(1).normal(0, 0.1, 20 * SR)
+
+    assert dj_mix.estimate_key(noise.astype(np.float32)) == -1
+    assert dj_mix.estimate_key(np.zeros(100, dtype=np.float32)) == -1
+
+
+def test_camelot_wheel() -> None:
+    codes = {dj_mix.camelot_code(k) for k in range(24)}
+
+    assert len(codes) == 24
+    assert dj_mix.camelot_code(11) == "1B"  # B major
+    assert dj_mix.camelot_code(12 + 8) == "1A"  # G# minor
+    assert dj_mix.camelot_code(12 + 9) == "8A"  # A minor
+    assert dj_mix.camelot_code(-1) == ""
+    assert dj_mix.key_name(12 + 6) == "F# minor"

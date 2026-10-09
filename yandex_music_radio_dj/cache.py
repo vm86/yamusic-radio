@@ -91,11 +91,15 @@ class TrackCache:
                 # The key was not analyzed, or by something worse: analyze
                 # the track again.
                 return None
-            return TrackAnalysis(**fields)
+            analysis = TrackAnalysis(**fields)
         except (TypeError, ValueError):
             # Written by another version of the program: analyze again.
             log.warning("Ignoring cached analysis of %s", track_id)
             return None
+        if analysis.key < 0 and key_detector() == "essentia":
+            # No key was found, perhaps by an older detector: try again.
+            return None
+        return analysis
 
     def put_analysis(
         self,

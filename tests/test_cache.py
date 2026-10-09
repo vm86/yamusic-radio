@@ -1,6 +1,7 @@
 # ruff: noqa: S101, PLR2004
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 from typing import TYPE_CHECKING
@@ -11,6 +12,8 @@ from yandex_music_radio_dj.dj_mix import TrackAnalysis, key_detector
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 ANALYSIS = TrackAnalysis(
     bpm=124.0,
     head_beat=100.5,
@@ -20,6 +23,7 @@ ANALYSIS = TrackAnalysis(
     loudness_db=-9.5,
     intro_end=500,
     outro_start=15000,
+    key=9,
 )
 
 
@@ -157,3 +161,22 @@ def test_key_pairs_from_an_older_cache_are_not_counted(tmp_path: Path) -> None:
     assert cache.transition_stats()["total"] == 2  # both are counted
     assert cache.key_pairs() == [("8A", "9A", 1)]  # only one has its keys
     cache.close()
+
+
+def test_analysis_without_a_key_is_made_again_by_essentia(
+    track_cache: TrackCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = track_cache
+    keyless = dataclasses.replace(ANALYSIS, key=-1)
+    cache.put_analysis("1", "mp3", "A - B", keyless)
+
+    monkeypatch.setattr(
+        "yandex_music_radio_dj.cache.key_detector", lambda: "essentia"
+    )
+    assert cache.get_analysis("1", "mp3") is None
+
+    monkeypatch.setattr(
+        "yandex_music_radio_dj.cache.key_detector", lambda: "chroma profiles"
+    )
+    cache.put_analysis("1", "mp3", "A - B", keyless)
+    assert cache.get_analysis("1", "mp3") == keyless

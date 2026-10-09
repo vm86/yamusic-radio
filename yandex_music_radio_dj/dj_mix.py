@@ -379,19 +379,17 @@ def estimate_key(mono: Pcm) -> int:
     """Key of the track (see TrackAnalysis.key), -1 if there is none.
 
     Essentia tells the key much better than the plain profile match
-    (see README) but always names one, even for noise, so the plain
-    match decides first whether the track has a tonal centre at all. The
-    key is then Essentia's; where Essentia has no answer, or is not
-    installed, it is the key of the plain match.
+    (see README), also for dense, distorted music, whose pitch classes
+    the plain match finds as flat as noise. Where Essentia has no answer,
+    or is not installed, the plain match gives the key, if it finds a
+    tonal centre at all.
     """
-    key, confidence = _profile_key(mono)
-    if confidence < MIN_KEY_CONFIDENCE:
-        return -1
     if _KEY_EXTRACTOR is not None:
         found = _essentia_key(mono)
         if found >= 0:
             return found
-    return key
+    key, confidence = _profile_key(mono)
+    return key if confidence >= MIN_KEY_CONFIDENCE else -1
 
 
 def onset_envelope(mono: Pcm) -> npt.NDArray[np.float32]:

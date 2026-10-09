@@ -723,7 +723,9 @@ CHANNELS = dj_mix.CHANNELS
 
 
 def track_analysis(bpm: float) -> dj_mix.TrackAnalysis:
-    return dj_mix.TrackAnalysis(bpm, 0, 0, 0, 200 * SR, -10, 20 * SR, 180 * SR)
+    return dj_mix.TrackAnalysis(
+        bpm, 0, 0, 0, 200 * SR, -10, 20 * SR, 180 * SR, key=9
+    )
 
 
 @pytest.mark.asyncio
@@ -1121,11 +1123,20 @@ def test_estimate_key_finds_the_key(
     assert dj_mix.camelot_code(key) == camelot
 
 
-def test_estimate_key_of_noise_is_unknown() -> None:
-    noise = np.random.default_rng(1).normal(0, 0.1, 20 * SR)
-
-    assert dj_mix.estimate_key(noise.astype(np.float32)) == -1
+def test_estimate_key_of_silence_is_unknown() -> None:
     assert dj_mix.estimate_key(np.zeros(100, dtype=np.float32)) == -1
+    assert dj_mix.estimate_key(np.zeros(20 * SR, dtype=np.float32)) == -1
+
+
+def test_essentia_decides_where_the_plain_match_sees_only_noise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Dense distorted music: flat pitch classes, but Essentia knows the key.
+    monkeypatch.setattr(dj_mix, "_KEY_EXTRACTOR", lambda _: None)
+    monkeypatch.setattr(dj_mix, "_essentia_key", lambda _: 15)
+    monkeypatch.setattr(dj_mix, "_profile_key", lambda _: (3, 0.1))
+
+    assert dj_mix.estimate_key(chord_track(9, minor=True)) == 15
 
 
 def test_camelot_wheel() -> None:
@@ -1360,6 +1371,7 @@ async def test_transitions_are_counted_and_kept(
     second = await radio.next_deck(first.analysis)
     third = await radio.next_deck(second.analysis)
     first.beat_matched = third.beat_matched = False
+    first.analysis = dataclasses.replace(first.analysis, key=-1)
     second.beat_matched = True
     keyed = dataclasses.replace(second.analysis, key=key_of("8A"))
     second.analysis = keyed
@@ -1548,6 +1560,9 @@ def test_key_falls_back_to_the_plain_match_when_essentia_has_no_answer(
     monkeypatch.setattr(dj_mix, "_essentia_key", lambda _: -1)
 
     assert dj_mix.estimate_key(track_pcm) == plain
+    # The plain match must still find a tonal centre.
+    monkeypatch.setattr(dj_mix, "_profile_key", lambda _: (3, 0.1))
+    assert dj_mix.estimate_key(track_pcm) == -1
 
 
 def test_essentia_failure_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:

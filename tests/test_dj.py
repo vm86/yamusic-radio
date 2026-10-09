@@ -1375,13 +1375,35 @@ async def test_transitions_are_counted_and_kept(
         "beat_matched": 1,
         "by_type": {"bass swap": 2, "filter sweep": 1},
         "by_key": {"unknown": 2, "neighbour": 1},
+        "by_quality": {"good": 1, "fair": 0, "poor": 0, "unknown": 2},
     }
-    assert stats["all_time"] == {
-        "total": 3,
-        "beat_matched": 1,
-        "by_type": {"bass swap": 2, "filter sweep": 1},
-        "by_key": {"unknown": 2, "neighbour": 1},
-    }
+    assert stats["all_time"] == stats["session"]
+
+    pairs = radio.key_pair_stats()
+    assert pairs["session"] == pairs["all_time"]
+    assert pairs["session"] == [
+        {
+            "from": None,
+            "to": "8A",
+            "relation": "unknown",
+            "quality": "unknown",
+            "count": 1,
+        },
+        {
+            "from": "8A",
+            "to": "9A",
+            "relation": "neighbour",
+            "quality": "good",
+            "count": 1,
+        },
+        {
+            "from": "9A",
+            "to": None,
+            "relation": "unknown",
+            "quality": "unknown",
+            "count": 1,
+        },
+    ]
 
 
 def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
@@ -1393,9 +1415,11 @@ def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
             "beat_matched": 0,
             "by_type": {},
             "by_key": {},
+            "by_quality": {"good": 0, "fair": 0, "poor": 0, "unknown": 0},
         },
         "all_time": None,
     }
+    assert radio.key_pair_stats() == {"session": [], "all_time": None}
 
 
 def genre_radio(
@@ -1496,3 +1520,19 @@ def test_genres_body_is_checked() -> None:
     for body in ({}, {"genres": "a"}, {"genres": [1]}, [], None):
         with pytest.raises(web.HTTPBadRequest):
             dj._parse_genres(body)
+
+
+def test_key_quality() -> None:
+    assert dj_mix.quality_counts(
+        {
+            "same": 2,
+            "neighbour": 3,
+            "boost": 1,
+            "diagonal": 1,
+            "clash": 4,
+            "unknown": 5,
+        }
+    ) == {"good": 5, "fair": 2, "poor": 4, "unknown": 5}
+    assert dj_mix.key_quality("nonsense") == "unknown"
+    assert dj_mix.camelot_key("8A") == key_of("8A")
+    assert dj_mix.camelot_key("") == -1

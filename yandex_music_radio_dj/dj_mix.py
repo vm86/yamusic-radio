@@ -241,6 +241,14 @@ def camelot_code(key: int) -> str:
     return f"{number}{'A' if minor else 'B'}"
 
 
+def camelot_key(code: str) -> int:
+    """Return the key (see TrackAnalysis.key) of a Camelot code, -1 if none."""
+    for key in range(KEYS):
+        if camelot_code(key) == code:
+            return key
+    return -1
+
+
 def key_name(key: int) -> str:
     if not 0 <= key < KEYS:
         return ""
@@ -266,6 +274,31 @@ def key_relation(current: int, following: int) -> str:
     else:
         relations = {0: "neighbour", 1: "diagonal", 11: "diagonal"}
     return relations.get(steps, "clash")
+
+
+# How good a key change is for the listener, roughly (see key_relation).
+KEY_QUALITY = {
+    "same": "good",
+    "neighbour": "good",
+    "boost": "fair",
+    "semitone": "fair",
+    "down": "fair",
+    "diagonal": "fair",
+    "clash": "poor",
+}
+
+
+def key_quality(relation: str) -> str:
+    """Return "good", "fair", "poor" or "unknown" for a key relation."""
+    return KEY_QUALITY.get(relation, "unknown")
+
+
+def quality_counts(by_key: dict[str, int]) -> dict[str, int]:
+    """Sum the counts of key relations up into the qualities."""
+    counts = dict.fromkeys(("good", "fair", "poor", "unknown"), 0)
+    for relation, number in by_key.items():
+        counts[key_quality(relation)] += number
+    return counts
 
 
 def key_cost(current: int, following: int) -> float:

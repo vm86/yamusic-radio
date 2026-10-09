@@ -128,3 +128,32 @@ def test_cache_without_the_genre_column_is_upgraded(tmp_path: Path) -> None:
 
     assert cache.get_genre("1", "mp3") == ""
     cache.close()
+
+
+def test_key_pairs_from_an_older_cache_are_not_counted(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.executescript(
+        "CREATE TABLE transitions (at REAL NOT NULL, kind TEXT NOT NULL,"
+        " beat_matched INTEGER NOT NULL, key_relation TEXT NOT NULL,"
+        " from_track TEXT NOT NULL, to_track TEXT NOT NULL);"
+        "INSERT INTO transitions"
+        " VALUES (1.0, 'bass swap', 1, 'same', 'a', 'b');"
+    )
+    db.commit()
+    db.close()
+
+    cache = TrackCache(path)
+    cache.add_transition(
+        "bass swap",
+        beat_matched=True,
+        key_relation="neighbour",
+        from_track="b",
+        to_track="c",
+        from_key="8A",
+        to_key="9A",
+    )
+
+    assert cache.transition_stats()["total"] == 2  # both are counted
+    assert cache.key_pairs() == [("8A", "9A", 1)]  # only one has its keys
+    cache.close()

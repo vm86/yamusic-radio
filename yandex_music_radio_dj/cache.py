@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS transitions (
     beat_matched INTEGER NOT NULL,
     key_relation TEXT NOT NULL,
     from_track TEXT NOT NULL,
-    to_track TEXT NOT NULL
+    to_track TEXT NOT NULL,
+    from_key TEXT,
+    to_key TEXT
 );
 CREATE INDEX IF NOT EXISTS tracks_played ON tracks (played_at);
 CREATE INDEX IF NOT EXISTS tracks_used ON tracks (used_at);
@@ -56,6 +58,16 @@ class TrackCache:
         columns = {
             row[1] for row in self._db.execute("PRAGMA table_info(tracks)")
         }
+        transition_columns = {
+            row[1] for row in self._db.execute("PRAGMA table_info(transitions)")
+        }
+        for column in ("from_key", "to_key"):
+            if column not in transition_columns:
+                # Made before the keys of the transitions were kept: those
+                # rows have no key (NULL), unlike a key that was not found.
+                self._db.execute(
+                    f"ALTER TABLE transitions ADD COLUMN {column} TEXT"
+                )
         if "genre" not in columns:
             # A cache made before the genre was kept.
             self._db.execute(
@@ -138,10 +150,17 @@ class TrackCache:
         key_relation: str,
         from_track: str,
         to_track: str,
+        from_key: str = "",
+        to_key: str = "",
     ) -> None:
-        """Remember how one track was blended into the next."""
+        """Remember how one track was blended into the next.
+
+        The keys are Camelot codes, empty when a key was not found.
+        """
         self._db.execute(
-            "INSERT INTO transitions VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO transitions (at, kind, beat_matched, key_relation, "
+            "from_track, to_track, from_key, to_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 time.time(),
                 kind,
@@ -149,9 +168,20 @@ class TrackCache:
                 key_relation,
                 from_track,
                 to_track,
+                from_key,
+                to_key,
             ),
         )
         self._db.commit()
+
+    def key_pairs(self) -> list[tuple[str, str, int]]:
+        """Return every key change there was, the most common first."""
+        rows = self._db.execute(
+            "SELECT from_key, to_key, COUNT(*) AS n FROM transitions "
+            "WHERE from_key IS NOT NULL AND to_key IS NOT NULL "
+            "GROUP BY from_key, to_key ORDER BY n DESC, from_key, to_key"
+        ).fetchall()
+        return [(str(a), str(b), int(n)) for a, b, n in rows]
 
     def transition_stats(self) -> dict[str, object]:
         """Count the transitions ever made by kind and by key change."""

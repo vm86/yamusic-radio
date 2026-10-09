@@ -665,15 +665,10 @@ const TRANSITIONS = {
   "filter sweep": "Фильтр-свип",
   crossfade: "Кроссфейд",
 };
-const KEY_CHANGES = {
-  same: "Та же тональность",
-  neighbour: "Соседняя или параллельная",
-  boost: "+2 — подъём энергии",
-  semitone: "+7 — полутон вверх",
-  down: "−2",
-  diagonal: "Диагональ",
-  clash: "Конфликт",
-  unknown: "Тональность неизвестна",
+const QUALITY = {
+  good: "Удачные",
+  fair: "Допустимые",
+  poor: "Неудачные",
 };
 
 function statRows(counts, names, total) {
@@ -695,6 +690,8 @@ function renderStats(stats) {
   $("stats-card").hidden = !data.total;
   if (!data.total) return;
   $("stats-scope").textContent = stats.all_time ? "за всё время" : "с запуска";
+  const quality = data.by_quality;
+  const judged = quality.good + quality.fair + quality.poor;
   $("stats").replaceChildren(
     el("div", { class: "stats" },
       el("h3", {}, "Тип"),
@@ -702,8 +699,15 @@ function renderStats(stats) {
       el("h3", {}, "По ритму"),
       ...statRows({ matched: data.beat_matched, free: data.total - data.beat_matched },
         { matched: "Биты совпали", free: "Без подгонки темпа" }, data.total),
-      el("h3", {}, "Смена тональности"),
-      ...statRows(data.by_key, KEY_CHANGES, data.total),
+      el("h3", {}, "Удачность по тональностям"),
+      ...statRows(
+        { good: quality.good, fair: quality.fair, poor: quality.poor },
+        QUALITY,
+        judged,
+      ),
+      el("p", { class: "hint" }, quality.unknown
+        ? `Ещё ${quality.unknown} — тональность неизвестна, не учтены.`
+        : ""),
     ),
   );
 }

@@ -287,6 +287,7 @@ class Radio:
         self._transitions: Counter[str] = Counter()
         self._transition_keys: Counter[str] = Counter()
         self._matched_transitions = 0
+        self._key_pairs: Counter[tuple[str, str]] = Counter()
         self._slots = Semaphore(PREPARE_CONCURRENCY)
         self._load_lock = Lock()
         self._feedback_tasks: set[Task[None]] = set()
@@ -841,6 +842,9 @@ class Radio:
         )
         self._transitions[kind.value] += 1
         self._transition_keys[relation] += 1
+        self._key_pairs[
+            current.analysis.camelot, following.analysis.camelot
+        ] += 1
         self._matched_transitions += following.beat_matched
         if self._cache is not None:
             self._cache.add_transition(
@@ -849,23 +853,40 @@ class Radio:
                 key_relation=relation,
                 from_track=current.track.track_id if current.track else "",
                 to_track=following.track.track_id if following.track else "",
+                from_key=current.analysis.camelot,
+                to_key=following.analysis.camelot,
             )
 
     def transition_stats(self) -> dict[str, object]:
         """Describe the transitions of this run and of all runs."""
-        return {
-            "session": {
-                "total": self._transitions.total(),
-                "beat_matched": self._matched_transitions,
-                "by_type": dict(self._transitions.most_common()),
-                "by_key": dict(self._transition_keys.most_common()),
-            },
-            "all_time": (
-                self._cache.transition_stats()
-                if self._cache is not None
-                else None
-            ),
+        session = {
+            "total": self._transitions.total(),
+            "beat_matched": self._matched_transitions,
+            "by_type": dict(self._transitions.most_common()),
+            "by_key": dict(self._transition_keys.most_common()),
         }
+        all_time = (
+            self._cache.transition_stats() if self._cache is not None else None
+        )
+        for stats in (session, all_time):
+            if stats is not None:
+                stats["by_quality"] = dj_mix.quality_counts(
+                    stats["by_key"]  # type: ignore[arg-type]
+                )
+        return {"session": session, "all_time": all_time}
+
+    def key_pair_stats(self) -> dict[str, object]:
+        """List every change of key there was, with how often."""
+        session = [
+            _key_pair(now, then, number)
+            for (now, then), number in self._key_pairs.most_common()
+        ]
+        all_time = (
+            [_key_pair(a, b, n) for a, b, n in self._cache.key_pairs()]
+            if self._cache is not None
+            else None
+        )
+        return {"session": session, "all_time": all_time}
 
     def started(self, deck: Deck) -> None:
         """Tell the station the track has begun to be heard."""
@@ -1064,6 +1085,20 @@ def _parse_moods(body: object) -> list[str]:
     return moods
 
 
+def _key_pair(now: str, then: str, number: int) -> dict[str, object]:
+    """Describe one change of key; a key that was not found is null."""
+    relation = dj_mix.key_relation(
+        dj_mix.camelot_key(now), dj_mix.camelot_key(then)
+    )
+    return {
+        "from": now or None,
+        "to": then or None,
+        "relation": relation,
+        "quality": dj_mix.key_quality(relation),
+        "count": number,
+    }
+
+
 def _parse_genres(body: object) -> list[str]:
     genres = body.get("genres") if isinstance(body, dict) else None
     if not isinstance(genres, list) or not all(
@@ -1090,6 +1125,19 @@ def _add_genres_api(app: web.Application, radio: Radio) -> None:
     app.router.add_get("/api/genres", get_genres)
     app.router.add_put("/api/genres", put_genres)
     app.router.add_delete("/api/genres", delete_genres)
+
+
+def _add_stats_api(app: web.Application, radio: Radio) -> None:
+    """Add the endpoints on how the tracks were blended."""
+
+    async def stats(_: web.Request) -> web.Response:
+        return web.json_response(radio.transition_stats())
+
+    async def key_pairs(_: web.Request) -> web.Response:
+        return web.json_response(radio.key_pair_stats())
+
+    app.router.add_get("/api/stats", stats)
+    app.router.add_get("/api/stats/keys", key_pairs)
 
 
 def add_api(app: web.Application, radio: Radio) -> None:
@@ -1119,9 +1167,6 @@ def add_api(app: web.Application, radio: Radio) -> None:
         await radio.set_allowed_moods(moods)
         return web.json_response(radio.moods_info())
 
-    async def stats(_: web.Request) -> web.Response:
-        return web.json_response(radio.transition_stats())
-
     async def refresh_queue(_: web.Request) -> web.Response:
         radio.refresh_queue()
         return web.json_response(radio.queue())
@@ -1138,7 +1183,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
     app.router.add_delete("/api/moods", delete_moods)
     app.router.add_post("/api/queue/refresh", refresh_queue)
     _add_genres_api(app, radio)
-    app.router.add_get("/api/stats", stats)
+    _add_stats_api(app, radio)
 
 
 def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:

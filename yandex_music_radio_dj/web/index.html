@@ -325,6 +325,7 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
 .stat .n { font: var(--md-sys-typescale-label-large); color: var(--md-sys-color-on-surface-variant); }
 .stat .meter { grid-column: 1 / -1; height: 4px; border-radius: var(--md-sys-shape-corner-full); background: var(--md-sys-color-secondary-container); overflow: hidden; }
 .stat .meter > i { display: block; height: 100%; background: var(--md-sys-color-primary); }
+.hint.pending { color: var(--md-sys-color-primary); }
 .empty { padding: 24px 0 8px; text-align: center; color: var(--md-sys-color-on-surface-variant); }
 
 .btn {
@@ -431,6 +432,12 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
       <div class="chips" id="moods" role="group" aria-label="Настроение"></div>
     </section>
 
+    <section class="card" id="genres-card" hidden>
+      <div class="card-head"><h2>Жанры</h2></div>
+      <p class="hint" id="genres-hint"></p>
+      <div class="chips" id="genres" role="group" aria-label="Жанры"></div>
+    </section>
+
     <section class="card" id="stats-card" hidden>
       <div class="card-head"><h2>Переходы</h2><span class="hint" id="stats-scope"></span></div>
       <div id="stats"></div>
@@ -469,7 +476,7 @@ const $ = (id) => document.getElementById(id);
 const audio = new Audio();
 audio.preload = "none";
 
-const state = { now: null, fetchedAt: 0, moods: null, moodsKey: "", busy: false };
+const state = { now: null, fetchedAt: 0, moods: null, moodsKey: "", genres: null, genresKey: "", busy: false };
 
 function el(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -701,6 +708,65 @@ function renderStats(stats) {
   );
 }
 
+function makeChip(label, pressed, onClick) {
+  const mark = document.createElementNS(SVG_NS, "svg");
+  mark.setAttribute("class", "icon");
+  mark.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", "#i-check");
+  mark.append(use);
+  const chip = el(
+    "button",
+    { class: "chip", type: "button", "aria-pressed": String(pressed) },
+    mark,
+    label,
+  );
+  chip.addEventListener("click", onClick);
+  return chip;
+}
+
+/* Genres: picking them changes nothing until the queue is rebuilt. */
+function renderGenres(genres) {
+  const key = JSON.stringify(genres);
+  if (key === state.genresKey) return; // keep the chips alive between polls
+  state.genresKey = key;
+  state.genres = genres;
+  const box = $("genres");
+  box.replaceChildren();
+  box.append(makeChip("Любые", !genres.selected.length, () => setGenres([])));
+  for (const genre of genres.available) {
+    const selected = genres.selected.includes(genre);
+    box.append(
+      makeChip(genre, selected, () => {
+        const next = new Set(genres.selected);
+        if (selected) next.delete(genre); else next.add(genre);
+        setGenres([...next]);
+      }),
+    );
+  }
+  const changed = JSON.stringify(genres.selected) !== JSON.stringify(genres.applied);
+  $("genres-hint").textContent = changed
+    ? "Выбор изменён: он вступит в силу после кнопки «Обновить очередь»."
+    : "Очередь строится из выбранных жанров, пока выбор не изменится. Применяется кнопкой «Обновить очередь». Жанры берутся из уже проигранных треков.";
+  $("genres-hint").classList.toggle("pending", changed);
+  $("genres-card").hidden = !genres.available.length && !genres.selected.length;
+}
+
+async function setGenres(list) {
+  try {
+    const genres = list.length
+      ? await api("/api/genres", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ genres: list }),
+        })
+      : await api("/api/genres", { method: "DELETE" });
+    renderGenres(genres);
+  } catch (error) {
+    toast("Не удалось выбрать жанры: " + error.message);
+  }
+}
+
 function renderMoods(moods) {
   const key = JSON.stringify(moods);
   if (key === state.moodsKey) return; // keep the chips alive between polls
@@ -709,22 +775,7 @@ function renderMoods(moods) {
   const box = $("moods");
   box.replaceChildren();
   const any = !moods.selected.length;
-  const make = (label, pressed, onClick) => {
-    const mark = document.createElementNS(SVG_NS, "svg");
-    mark.setAttribute("class", "icon");
-    mark.setAttribute("aria-hidden", "true");
-    const use = document.createElementNS(SVG_NS, "use");
-    use.setAttribute("href", "#i-check");
-    mark.append(use);
-    const chip = el(
-      "button",
-      { class: "chip", type: "button", "aria-pressed": String(pressed) },
-      mark,
-      label,
-    );
-    chip.addEventListener("click", onClick);
-    return chip;
-  };
+  const make = makeChip;
   box.append(make("Любое", any, () => setMoods([])));
   for (const mood of moods.available) {
     const selected = moods.selected.includes(mood);
@@ -744,6 +795,7 @@ async function refreshQueue() {
   try {
     const queue = await api("/api/queue/refresh", { method: "POST" });
     renderQueue(queue);
+    renderGenres(await api("/api/genres"));
     toast("Очередь пересобрана из загруженных треков");
   } catch (error) {
     toast("Не удалось обновить очередь: " + error.message);
@@ -794,11 +846,12 @@ function renderAuth(auth) {
 let failures = 0;
 async function refresh() {
   try {
-    const [auth, queue, stats] = await Promise.all([api("/api/auth"), api("/api/queue"), api("/api/stats")]);
+    const [auth, queue, stats, genres] = await Promise.all([api("/api/auth"), api("/api/queue"), api("/api/stats"), api("/api/genres")]);
     failures = 0;
     renderAuth(auth);
     renderQueue(queue);
     renderStats(stats);
+    renderGenres(genres);
     if (!state.busy) renderMoods(queue.moods);
     $("moods").querySelectorAll(".chip").forEach((chip) => { chip.disabled = !auth.authorized; });
   } catch (error) {

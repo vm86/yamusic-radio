@@ -66,6 +66,8 @@ PREPARE_CONCURRENCY = 3
 # Give up filling the pool after this many batches without a usable track:
 # the station only repeats itself.
 MAX_EMPTY_BATCHES = 5
+# Batches of the station with nothing of the wanted genres in a row.
+MAX_OFF_GENRE_BATCHES = 20
 # When no track in the pool fits the one playing, load this many more...
 EXTRA_TRACKS = 3
 # ...up to this many, and take the best there is after that.
@@ -163,6 +165,7 @@ class Candidate:
     track: ExtendTrack | None = None
     # The station mood the track was fetched with.
     mood: str = ""
+    genre: str = ""
 
 
 @dataclass(slots=True)
@@ -265,6 +268,13 @@ class Radio:
         self._before: deque[TrackInfo] = deque(maxlen=MAX_LISTED)
         # Only these station moods are played; empty is any.
         self._allowed_moods: tuple[str, ...] = ()
+        # Genres picked on the page, and the ones the queue is built from:
+        # the first become the second only when the queue is rebuilt.
+        self._wanted_genres: tuple[str, ...] = ()
+        self._allowed_genres: tuple[str, ...] = ()
+        # Tracks of other genres that the station offered: not asked again
+        # for as long as the genres stay the same.
+        self._off_genre: set[str] = set()
         # Tracks that were fetched or played; not picked again. What was
         # played before this run comes from the cache.
         self._seen: set[str] = set()
@@ -363,6 +373,12 @@ class Radio:
         selected now. Nothing is downloaded for it.
         """
         self._generation += 1
+        if self._allowed_genres != self._wanted_genres:
+            self._allowed_genres = self._wanted_genres
+            self._off_genre.clear()
+            log.info(
+                "Genres played: %s", ", ".join(self._allowed_genres) or "any"
+            )
         deck, self._next = self._next, None
         if deck is not None:
             self._unpick(deck)
@@ -391,14 +407,41 @@ class Radio:
         if source.path.exists():
             self._pool.append(source)
 
+    def _wanted(self, candidate: Candidate) -> bool:
+        """Say whether the mood and the genre of a pool track are allowed."""
+        return self._mood_allowed(candidate.mood) and self._genre_allowed(
+            candidate.genre
+        )
+
+    def _mood_allowed(self, mood: str) -> bool:
+        return not self._allowed_moods or mood in self._allowed_moods
+
+    def _genre_allowed(self, genre: str) -> bool:
+        return not self._allowed_genres or genre in self._allowed_genres
+
     def _drop_unwanted(self) -> None:
-        """Forget the pool tracks that were fetched for other moods."""
-        if not self._allowed_moods:
-            return
+        """Forget the pool tracks of other moods or genres."""
         for candidate in list(self._pool):
-            if candidate.mood not in self._allowed_moods:
+            if not self._wanted(candidate):
                 self._pool.remove(candidate)
                 candidate.path.unlink(missing_ok=True)
+
+    def set_wanted_genres(self, genres: Iterable[str]) -> None:
+        """Pick the genres. The queue follows them once it is rebuilt."""
+        self._wanted_genres = tuple(dict.fromkeys(genres))
+
+    def genres_info(self) -> dict[str, object]:
+        """Genres to pick from, the ones picked and the ones in force."""
+        known = self._cache.known_genres() if self._cache is not None else []
+        available = [name for name, _ in known]
+        for genre in (*self._wanted_genres, *self._allowed_genres):
+            if genre not in available:
+                available.append(genre)
+        return {
+            "available": available,
+            "selected": list(self._wanted_genres),
+            "applied": list(self._allowed_genres),
+        }
 
     def queue(
         self, before: int = 2, after: int = MAX_LISTED
@@ -458,11 +501,7 @@ class Radio:
                     self._next.mood,
                 )
             )
-        pool = [
-            c
-            for c in self._pool
-            if not self._allowed_moods or c.mood in self._allowed_moods
-        ]
+        pool = [c for c in self._pool if self._wanted(c)]
         history = tuple(self._history)
         position = self._position
         while len(found) < limit and pool:
@@ -520,12 +559,31 @@ class Radio:
                 await self._set_mood(mood)
             else:
                 mood = ""
+            off_genre_batches = 0
             while (wanted := count - (len(self._pool) - before)) > 0:
                 batch = await self._player.station_batch(
-                    self._station_id, exclude_track_ids=self._seen
+                    self._station_id,
+                    exclude_track_ids=self._seen | self._off_genre,
                 )
-                fresh = [t for t in batch if t.track_id not in self._seen]
-                fresh = fresh[:wanted]
+                fresh = [
+                    t
+                    for t in batch
+                    if t.track_id not in self._seen
+                    and t.track_id not in self._off_genre
+                ]
+                wanted_genre = [
+                    t for t in fresh if self._genre_allowed(t.genre)
+                ]
+                self._off_genre.update(
+                    t.track_id for t in fresh if t not in wanted_genre
+                )
+                if fresh and not wanted_genre:
+                    off_genre_batches += 1
+                    if off_genre_batches >= MAX_OFF_GENRE_BATCHES:
+                        break
+                    continue
+                off_genre_batches = 0
+                fresh = wanted_genre[:wanted]
                 self._seen.update(t.track_id for t in fresh)
                 added = len(self._pool)
                 await gather(*(self._prepare(t, mood) for t in fresh))
@@ -602,6 +660,7 @@ class Radio:
                 frozenset(track.artists_name()),
                 track,
                 mood,
+                track.genre,
             )
         )
         self._added.set()
@@ -713,6 +772,7 @@ class Radio:
                 played.analysis,
                 played.artists,
                 played.track,
+                genre=played.track.genre,
             )
         raise RuntimeError("No tracks to play")
 
@@ -1004,6 +1064,34 @@ def _parse_moods(body: object) -> list[str]:
     return moods
 
 
+def _parse_genres(body: object) -> list[str]:
+    genres = body.get("genres") if isinstance(body, dict) else None
+    if not isinstance(genres, list) or not all(
+        isinstance(g, str) for g in genres
+    ):
+        raise web.HTTPBadRequest(text='expected {"genres": [...]}')
+    return genres
+
+
+def _add_genres_api(app: web.Application, radio: Radio) -> None:
+    """Add the genre endpoints: picked here, in force after a refresh."""
+
+    async def get_genres(_: web.Request) -> web.Response:
+        return web.json_response(radio.genres_info())
+
+    async def put_genres(request: web.Request) -> web.Response:
+        radio.set_wanted_genres(_parse_genres(await _json_body(request)))
+        return web.json_response(radio.genres_info())
+
+    async def delete_genres(_: web.Request) -> web.Response:
+        radio.set_wanted_genres([])
+        return web.json_response(radio.genres_info())
+
+    app.router.add_get("/api/genres", get_genres)
+    app.router.add_put("/api/genres", put_genres)
+    app.router.add_delete("/api/genres", delete_genres)
+
+
 def add_api(app: web.Application, radio: Radio) -> None:
     """Add the REST API to the app, under /api."""
 
@@ -1049,6 +1137,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
     app.router.add_post("/api/queue/refresh", refresh_queue)
+    _add_genres_api(app, radio)
     app.router.add_get("/api/stats", stats)
 
 

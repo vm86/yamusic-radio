@@ -8,6 +8,7 @@ import itertools
 from typing import TYPE_CHECKING
 
 import pytest
+from aiohttp import web
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -705,6 +706,7 @@ def make_radio(
                 frozenset(track.artists_name()),
                 track,
                 mood,
+                track.genre,
             )
         )
 
@@ -1394,3 +1396,103 @@ def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
         },
         "all_time": None,
     }
+
+
+def genre_radio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracks: list[FakeTrack]
+) -> dj.Radio:
+    return make_radio(tmp_path, monkeypatch, FakePlayer([tracks]), {})
+
+
+@pytest.mark.asyncio
+async def test_picked_genres_wait_for_the_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = genre_radio(
+        tmp_path,
+        monkeypatch,
+        [FakeTrack("a", genre="house"), FakeTrack("b", genre="rap")],
+    )
+    await radio.fill(2)
+
+    radio.set_wanted_genres(["house"])
+
+    assert radio.genres_info()["selected"] == ["house"]
+    assert radio.genres_info()["applied"] == []
+    assert len(radio.pool) == 2  # nothing is rebuilt by itself
+
+    radio.refresh_queue()
+
+    assert radio.genres_info()["applied"] == ["house"]
+    assert [c.title for c in radio.pool] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_takes_back_the_chosen_track_of_another_genre(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = genre_radio(
+        tmp_path,
+        monkeypatch,
+        [FakeTrack("a", genre="rap"), FakeTrack("b", genre="house")],
+    )
+    await radio.fill(2)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    chosen = await radio.next_deck(first.analysis)
+    assert chosen.track is not None
+    other = "rap" if chosen.track.genre == "house" else "house"
+
+    radio.set_wanted_genres([other])
+    radio.refresh_queue()
+
+    assert all(c.genre == other for c in radio.pool)
+    assert chosen.title not in [c.title for c in radio.pool]
+
+
+@pytest.mark.asyncio
+async def test_tracks_of_other_genres_are_not_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = genre_radio(
+        tmp_path,
+        monkeypatch,
+        [
+            FakeTrack("a", genre="house"),
+            FakeTrack("b", genre="rap"),
+            FakeTrack("c", genre="house"),
+            FakeTrack("d"),
+        ],
+    )
+    radio.set_wanted_genres(["house"])
+    radio.refresh_queue()
+
+    await radio.fill(4)
+
+    assert sorted(c.title for c in radio.pool) == ["a", "c"]
+
+
+def test_genres_to_pick_are_the_known_ones(
+    tmp_path: Path, track_cache: TrackCache
+) -> None:
+    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+    for name, genre in (
+        ("1", "rap"),
+        ("2", "house"),
+        ("3", "house"),
+        ("4", ""),
+    ):
+        track_cache.put_analysis(name, "mp3", name, track_analysis(120), genre)
+
+    radio.set_wanted_genres(["techno"])  # not heard yet, still shown
+
+    info = radio.genres_info()
+    assert info["available"] == ["house", "rap", "techno"]
+    assert info["selected"] == ["techno"]
+
+
+def test_genres_body_is_checked() -> None:
+    assert dj._parse_genres({"genres": ["a", "b"]}) == ["a", "b"]
+    for body in ({}, {"genres": "a"}, {"genres": [1]}, [], None):
+        with pytest.raises(web.HTTPBadRequest):
+            dj._parse_genres(body)

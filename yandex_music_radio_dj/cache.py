@@ -173,6 +173,14 @@ class TrackCache:
             "by_key": count("key_relation"),
         }
 
+    def known_genres(self) -> list[tuple[str, int]]:
+        """Return the genres of the cached tracks, the most common first."""
+        rows = self._db.execute(
+            "SELECT genre, COUNT(DISTINCT track_id) AS n FROM tracks "
+            "WHERE genre != '' GROUP BY genre ORDER BY n DESC, genre"
+        ).fetchall()
+        return [(str(genre), int(count)) for genre, count in rows]
+
     def mark_played(self, track_id: str, codec: str) -> None:
         now = time.time()
         self._db.execute(

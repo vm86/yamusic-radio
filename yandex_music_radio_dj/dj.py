@@ -81,7 +81,8 @@ MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
 MAX_LISTED = 15
 # The page the radio shows at /.
-WEB_PAGE = Path(__file__).parent / "web" / "index.html"
+WEB_DIR = Path(__file__).parent / "web"
+WEB_PAGE = WEB_DIR / "index.html"
 # Tracks played before a restart that the radio does not pick again.
 CACHED_PLAYED_SKIPPED = 200
 # The next track is chosen and decoded this long before the blend.
@@ -1204,14 +1205,24 @@ def add_api(app: web.Application, radio: Radio) -> None:
     _add_stats_api(app, radio)
 
 
-def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
+def _add_web_page(app: web.Application) -> None:
+    """Add the page and its scripts, built by `npm run build` in frontend/."""
+
     async def index(_: web.Request) -> web.Response:
         return web.Response(
             body=WEB_PAGE.read_bytes(),
             content_type="text/html",
             charset="utf-8",
+            # The page names its scripts by hash: always ask for a fresh one.
+            headers={"Cache-Control": "no-cache"},
         )
 
+    app.router.add_get("/", index)
+    if (WEB_DIR / "assets").is_dir():
+        app.router.add_static("/assets", WEB_DIR / "assets")
+
+
+def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
     async def stream(request: web.Request) -> web.StreamResponse:
         with_titles = request.headers.get("Icy-MetaData") == "1"
         headers = {
@@ -1250,8 +1261,8 @@ def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
         return response
 
     app = web.Application()
-    app.router.add_get("/", index)
     app.router.add_get("/stream", stream)
+    _add_web_page(app)
     if radio is not None:
         add_api(app, radio)
     return app

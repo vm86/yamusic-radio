@@ -1,0 +1,84 @@
+/* Material Design 3 tokens (indigo seed). One definition per role:
+   light-dark() picks the value from the used color scheme. */
+:root {
+  color-scheme: light dark;
+
+  --md-sys-color-primary: light-dark(#4355b9, #bac3ff);
+  --md-sys-color-on-primary: light-dark(#ffffff, #08218a);
+  --md-sys-color-primary-container: light-dark(#dee0ff, #293ca0);
+  --md-sys-color-on-primary-container: light-dark(#00105c, #dee0ff);
+  --md-sys-color-secondary: light-dark(#5a5d72, #c3c5dd);
+  --md-sys-color-on-secondary: light-dark(#ffffff, #2c2f42);
+  --md-sys-color-secondary-container: light-dark(#e0e0f9, #444559);
+  --md-sys-color-on-secondary-container: light-dark(#181a2c, #e0e0f9);
+  --md-sys-color-tertiary: light-dark(#78536b, #e8b9d4);
+  --md-sys-color-on-tertiary: light-dark(#ffffff, #46263a);
+  --md-sys-color-tertiary-container: light-dark(#ffd8ee, #5e3c52);
+  --md-sys-color-on-tertiary-container: light-dark(#2e1126, #ffd8ee);
+  --md-sys-color-error: light-dark(#ba1a1a, #ffb4ab);
+  --md-sys-color-on-error: light-dark(#ffffff, #690005);
+  --md-sys-color-error-container: light-dark(#ffdad6, #93000a);
+  --md-sys-color-on-error-container: light-dark(#410002, #ffdad6);
+  --md-sys-color-surface: light-dark(#fbf8ff, #121318);
+  --md-sys-color-on-surface: light-dark(#1b1b21, #e4e1e9);
+  --md-sys-color-on-surface-variant: light-dark(#46464f, #c7c5d0);
+  --md-sys-color-surface-dim: light-dark(#dbd9e0, #121318);
+  --md-sys-color-surface-bright: light-dark(#fbf8ff, #38393f);
+  --md-sys-color-surface-container-lowest: light-dark(#ffffff, #0d0e13);
+  --md-sys-color-surface-container-low: light-dark(#f5f2fa, #1b1b21);
+  --md-sys-color-surface-container: light-dark(#efedf4, #1f1f25);
+  --md-sys-color-surface-container-high: light-dark(#e9e7ef, #292a2f);
+  --md-sys-color-surface-container-highest: light-dark(#e4e1e9, #34343a);
+  --md-sys-color-outline: light-dark(#777680, #918f9a);
+  --md-sys-color-outline-variant: light-dark(#c7c5d0, #46464f);
+  --md-sys-color-inverse-surface: light-dark(#303036, #e4e1e9);
+  --md-sys-color-inverse-on-surface: light-dark(#f2eff7, #303036);
+  --md-sys-color-inverse-primary: light-dark(#bac3ff, #4355b9);
+  --md-sys-color-scrim: #000000;
+  --md-sys-color-shadow: #000000;
+  --md-elevation-shadow: light-dark(rgb(0 0 0 / 0.18), rgb(0 0 0 / 0.5));
+
+  --md-ref-typeface: Roboto, "Segoe UI", system-ui, -apple-system, sans-serif;
+  --md-ref-typeface-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Type scale: font shorthand (weight size/line-height family) + tracking */
+  --md-sys-typescale-headline-small: 400 24px/32px var(--md-ref-typeface);
+  --md-sys-typescale-headline-small-tracking: 0;
+  --md-sys-typescale-title-large: 400 22px/28px var(--md-ref-typeface);
+  --md-sys-typescale-title-large-tracking: 0;
+  --md-sys-typescale-title-medium: 500 16px/24px var(--md-ref-typeface);
+  --md-sys-typescale-title-medium-tracking: 0.15px;
+  --md-sys-typescale-body-large: 400 16px/24px var(--md-ref-typeface);
+  --md-sys-typescale-body-large-tracking: 0.5px;
+  --md-sys-typescale-body-medium: 400 14px/20px var(--md-ref-typeface);
+  --md-sys-typescale-body-medium-tracking: 0.25px;
+  --md-sys-typescale-body-small: 400 12px/16px var(--md-ref-typeface);
+  --md-sys-typescale-body-small-tracking: 0.4px;
+  --md-sys-typescale-label-large: 500 14px/20px var(--md-ref-typeface);
+  --md-sys-typescale-label-large-tracking: 0.1px;
+  --md-sys-typescale-label-medium: 500 12px/16px var(--md-ref-typeface);
+  --md-sys-typescale-label-medium-tracking: 0.5px;
+
+  /* Shape */
+  --md-sys-shape-corner-extra-small: 4px;
+  --md-sys-shape-corner-small: 8px;
+  --md-sys-shape-corner-medium: 12px;
+  --md-sys-shape-corner-large: 16px;
+  --md-sys-shape-corner-large-increased: 20px;
+  --md-sys-shape-corner-extra-large: 28px;
+  --md-sys-shape-corner-full: 9999px;
+
+  /* Motion */
+  --md-sys-motion-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-easing-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-sys-motion-easing-linear: linear;
+  --md-sys-motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-duration-medium2: 300ms;
+  --md-sys-motion-duration-medium4: 400ms;
+  --md-sys-motion-duration-long2: 500ms;
+  /* Not in the spec: how long the decorative loops take */
+  --app-motion-spin: 8s;
+  --app-motion-pulse: 1.6s;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }

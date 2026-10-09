@@ -54,3 +54,6 @@ yandex_music_radio_dj/_version.py
 
 # coverage
 *.coverage
+
+# frontend
+frontend/node_modules/

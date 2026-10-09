@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import itertools
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -1032,7 +1033,14 @@ async def test_rest_api(
         page = await client.get("/")
         assert page.status == 200
         assert page.content_type == "text/html"
-        assert "Яндекс Музыка DJ" in await page.text()
+        text = await page.text()
+        assert "Яндекс Музыка DJ" in text
+        # Every script and style the page names is served.
+        paths = re.findall(r'(?:src|href)="\./(assets/[^"]+)"', text)
+        assert paths
+        for path in paths:
+            asset = await client.get(f"/{path}")
+            assert asset.status == 200, path
 
         queue = await (await client.get("/api/queue?next=2")).json()
         assert queue["now"]["title"] == deck.title

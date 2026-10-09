@@ -30,7 +30,7 @@ from asyncio import (
     gather,
     sleep,
 )
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -273,6 +273,10 @@ class Radio:
         # Counts the rebuilds of the queue: a deck chosen before the last
         # one is stale.
         self._generation = 0
+        # What the transitions of this run were like.
+        self._transitions: Counter[str] = Counter()
+        self._transition_keys: Counter[str] = Counter()
+        self._matched_transitions = 0
         self._slots = Semaphore(PREPARE_CONCURRENCY)
         self._load_lock = Lock()
         self._feedback_tasks: set[Task[None]] = set()
@@ -768,6 +772,41 @@ class Radio:
             self._next = deck
             return deck
 
+    def transition(
+        self, kind: dj_mix.Transition, current: Deck, following: Deck
+    ) -> None:
+        """Count a blend of the current deck into the following one."""
+        relation = dj_mix.key_relation(
+            current.analysis.key, following.analysis.key
+        )
+        self._transitions[kind.value] += 1
+        self._transition_keys[relation] += 1
+        self._matched_transitions += following.beat_matched
+        if self._cache is not None:
+            self._cache.add_transition(
+                kind.value,
+                beat_matched=following.beat_matched,
+                key_relation=relation,
+                from_track=current.track.track_id if current.track else "",
+                to_track=following.track.track_id if following.track else "",
+            )
+
+    def transition_stats(self) -> dict[str, object]:
+        """Describe the transitions of this run and of all runs."""
+        return {
+            "session": {
+                "total": self._transitions.total(),
+                "beat_matched": self._matched_transitions,
+                "by_type": dict(self._transitions.most_common()),
+                "by_key": dict(self._transition_keys.most_common()),
+            },
+            "all_time": (
+                self._cache.transition_stats()
+                if self._cache is not None
+                else None
+            ),
+        }
+
     def started(self, deck: Deck) -> None:
         """Tell the station the track has begun to be heard."""
         if self._now is not None:
@@ -866,6 +905,7 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
                 beat_matched=following.beat_matched,
             )
             log.info("Transition: %s", kind.value)
+            radio.transition(kind, current, following)
             # The filtering takes a while, don't stall the event loop with it.
             blended = await asyncio.to_thread(
                 dj_mix.blend,
@@ -991,6 +1031,9 @@ def add_api(app: web.Application, radio: Radio) -> None:
         await radio.set_allowed_moods(moods)
         return web.json_response(radio.moods_info())
 
+    async def stats(_: web.Request) -> web.Response:
+        return web.json_response(radio.transition_stats())
+
     async def refresh_queue(_: web.Request) -> web.Response:
         radio.refresh_queue()
         return web.json_response(radio.queue())
@@ -1006,6 +1049,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
     app.router.add_post("/api/queue/refresh", refresh_queue)
+    app.router.add_get("/api/stats", stats)
 
 
 def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:

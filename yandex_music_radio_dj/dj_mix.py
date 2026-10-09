@@ -117,6 +117,15 @@ KEY_SEMITONE_COST = 1.5  # seven steps up: the key goes up a semitone
 KEY_DOWN_COST = 1.8  # two steps down
 KEY_DIAGONAL_COST = 2.5  # a step round the wheel and the other mode
 KEY_CLASH_COST = 4.0  # keys that clash
+KEY_COSTS = {
+    "same": 0.0,
+    "neighbour": KEY_NEIGHBOUR_COST,
+    "boost": KEY_BOOST_COST,
+    "semitone": KEY_SEMITONE_COST,
+    "down": KEY_DOWN_COST,
+    "diagonal": KEY_DIAGONAL_COST,
+    "clash": KEY_CLASH_COST,
+}
 REPEAT_ARTIST_COST = 6.0
 ENERGY_ARC_COST = 8.0  # per unit of distance from the target energy
 # A next track costing more than this doesn't really fit: look for others.
@@ -239,6 +248,26 @@ def key_name(key: int) -> str:
     return f"{NOTES[key % PITCH_CLASSES]} {mode}"
 
 
+def key_relation(current: int, following: int) -> str:
+    """Name the key change: a key of KEY_COSTS, or "unknown"."""
+    now, then = camelot_code(current), camelot_code(following)
+    if not now or not then:
+        return "unknown"
+    steps = (int(then[:-1]) - int(now[:-1])) % 12
+    if now[-1] == then[-1]:
+        relations = {
+            0: "same",
+            1: "neighbour",
+            11: "neighbour",
+            2: "boost",
+            7: "semitone",
+            10: "down",
+        }
+    else:
+        relations = {0: "neighbour", 1: "diagonal", 11: "diagonal"}
+    return relations.get(steps, "clash")
+
+
 def key_cost(current: int, following: int) -> float:
     """Cost of a key change by the rules of harmonic mixing.
 
@@ -249,26 +278,8 @@ def key_cost(current: int, following: int) -> float:
     allowed and cost a little. Anything else clashes. Nothing is known
     about a key that was not detected, so it costs nothing.
     """
-    now, then = camelot_code(current), camelot_code(following)
-    if not now or not then:
-        return 0.0
-    steps = (int(then[:-1]) - int(now[:-1])) % 12
-    if now[-1] == then[-1]:
-        costs = {
-            0: 0.0,
-            1: KEY_NEIGHBOUR_COST,
-            11: KEY_NEIGHBOUR_COST,
-            2: KEY_BOOST_COST,
-            7: KEY_SEMITONE_COST,
-            10: KEY_DOWN_COST,
-        }
-    else:
-        costs = {
-            0: KEY_NEIGHBOUR_COST,
-            1: KEY_DIAGONAL_COST,
-            11: KEY_DIAGONAL_COST,
-        }
-    return KEY_COST_SCALE * costs.get(steps, KEY_CLASH_COST)
+    relation = key_relation(current, following)
+    return KEY_COST_SCALE * KEY_COSTS.get(relation, 0.0)
 
 
 def chroma(mono: Pcm) -> npt.NDArray[np.float64]:

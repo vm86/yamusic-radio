@@ -184,6 +184,11 @@ class FakeRadio:
     def is_stale(self, deck: dj.Deck) -> bool:
         return False
 
+    def transition(
+        self, kind: dj_mix.Transition, current: dj.Deck, following: dj.Deck
+    ) -> None:
+        self.events.append(("transition", f"{current.title}>{following.title}"))
+
     def started(self, deck: dj.Deck) -> None:
         self.events.append(("started", deck.title))
 
@@ -1314,3 +1319,78 @@ async def test_genre_is_kept_in_the_cache_not_in_the_api(
 
     info = dj.TrackInfo.of("a", track_analysis(120), None, "").to_dict()
     assert "genre" not in info
+
+
+def test_key_relations() -> None:
+    relations = {
+        ("8A", "8A"): "same",
+        ("8A", "9A"): "neighbour",
+        ("8A", "8B"): "neighbour",
+        ("8A", "10A"): "boost",
+        ("8A", "3A"): "semitone",
+        ("8A", "6A"): "down",
+        ("8A", "9B"): "diagonal",
+        ("8A", "2A"): "clash",
+    }
+    for (now, then), relation in relations.items():
+        assert dj_mix.key_relation(key_of(now), key_of(then)) == relation
+        assert dj_mix.key_cost(key_of(now), key_of(then)) == pytest.approx(
+            dj_mix.KEY_COSTS[relation] * dj_mix.KEY_COST_SCALE
+        )
+    assert dj_mix.key_relation(-1, key_of("8A")) == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_transitions_are_counted_and_kept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_cache: TrackCache,
+) -> None:
+    radio = make_radio(
+        tmp_path,
+        monkeypatch,
+        FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
+        {},
+        cache=track_cache,
+    )
+    await radio.fill(3)
+    first = await radio.next_deck(None)
+    second = await radio.next_deck(first.analysis)
+    third = await radio.next_deck(second.analysis)
+    first.beat_matched = third.beat_matched = False
+    second.beat_matched = True
+    keyed = dataclasses.replace(second.analysis, key=key_of("8A"))
+    second.analysis = keyed
+    third.analysis = dataclasses.replace(third.analysis, key=key_of("9A"))
+
+    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+    radio.transition(dj_mix.Transition.FILTER_SWEEP, second, third)
+    radio.transition(dj_mix.Transition.BASS_SWAP, third, first)
+
+    stats = radio.transition_stats()
+    assert stats["session"] == {
+        "total": 3,
+        "beat_matched": 1,
+        "by_type": {"bass swap": 2, "filter sweep": 1},
+        "by_key": {"unknown": 2, "neighbour": 1},
+    }
+    assert stats["all_time"] == {
+        "total": 3,
+        "beat_matched": 1,
+        "by_type": {"bass swap": 2, "filter sweep": 1},
+        "by_key": {"unknown": 2, "neighbour": 1},
+    }
+
+
+def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
+    radio = dj.Radio(FakePlayer([]), None, tmp_path)
+
+    assert radio.transition_stats() == {
+        "session": {
+            "total": 0,
+            "beat_matched": 0,
+            "by_type": {},
+            "by_key": {},
+        },
+        "all_time": None,
+    }

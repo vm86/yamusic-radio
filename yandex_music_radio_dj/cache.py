@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS tracks (
     used_at REAL NOT NULL,
     PRIMARY KEY (track_id, codec)
 );
+CREATE TABLE IF NOT EXISTS transitions (
+    at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    beat_matched INTEGER NOT NULL,
+    key_relation TEXT NOT NULL,
+    from_track TEXT NOT NULL,
+    to_track TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS tracks_played ON tracks (played_at);
 CREATE INDEX IF NOT EXISTS tracks_used ON tracks (used_at);
 """
@@ -121,6 +129,49 @@ class TrackCache:
             (track_id, codec),
         ).fetchone()
         return None if row is None else str(row[0])
+
+    def add_transition(
+        self,
+        kind: str,
+        *,
+        beat_matched: bool,
+        key_relation: str,
+        from_track: str,
+        to_track: str,
+    ) -> None:
+        """Remember how one track was blended into the next."""
+        self._db.execute(
+            "INSERT INTO transitions VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                time.time(),
+                kind,
+                int(beat_matched),
+                key_relation,
+                from_track,
+                to_track,
+            ),
+        )
+        self._db.commit()
+
+    def transition_stats(self) -> dict[str, object]:
+        """Count the transitions ever made by kind and by key change."""
+
+        def count(column: str) -> dict[str, int]:
+            rows = self._db.execute(
+                f"SELECT {column}, COUNT(*) FROM transitions "  # noqa: S608
+                f"GROUP BY {column} ORDER BY COUNT(*) DESC"
+            ).fetchall()
+            return {str(name): int(number) for name, number in rows}
+
+        total, matched = self._db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(beat_matched), 0) FROM transitions"
+        ).fetchone()
+        return {
+            "total": int(total),
+            "beat_matched": int(matched),
+            "by_type": count("kind"),
+            "by_key": count("key_relation"),
+        }
 
     def mark_played(self, track_id: str, codec: str) -> None:
         now = time.time()

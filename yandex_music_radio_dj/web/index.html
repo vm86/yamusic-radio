@@ -319,6 +319,12 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
   letter-spacing: var(--md-sys-typescale-label-medium-tracking);
   color: var(--md-sys-color-on-surface-variant);
 }
+.stats h3 { font: var(--md-sys-typescale-title-medium); letter-spacing: var(--md-sys-typescale-title-medium-tracking); margin: 16px 0 4px; }
+.stats h3:first-child { margin-top: 0; }
+.stat { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 4px 0; }
+.stat .n { font: var(--md-sys-typescale-label-large); color: var(--md-sys-color-on-surface-variant); }
+.stat .meter { grid-column: 1 / -1; height: 4px; border-radius: var(--md-sys-shape-corner-full); background: var(--md-sys-color-secondary-container); overflow: hidden; }
+.stat .meter > i { display: block; height: 100%; background: var(--md-sys-color-primary); }
 .empty { padding: 24px 0 8px; text-align: center; color: var(--md-sys-color-on-surface-variant); }
 
 .btn {
@@ -423,6 +429,11 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
       <div class="card-head"><h2>Настроение микса</h2></div>
       <p class="hint" id="moods-hint">Микс будет только между выбранными настроениями. Выбор меняет настройку станции в вашем аккаунте Яндекс Музыки.</p>
       <div class="chips" id="moods" role="group" aria-label="Настроение"></div>
+    </section>
+
+    <section class="card" id="stats-card" hidden>
+      <div class="card-head"><h2>Переходы</h2><span class="hint" id="stats-scope"></span></div>
+      <div id="stats"></div>
     </section>
   </div>
 
@@ -642,6 +653,54 @@ function renderQueue(queue) {
   );
 }
 
+const TRANSITIONS = {
+  "bass swap": "Обмен басами",
+  "filter sweep": "Фильтр-свип",
+  crossfade: "Кроссфейд",
+};
+const KEY_CHANGES = {
+  same: "Та же тональность",
+  neighbour: "Соседняя или параллельная",
+  boost: "+2 — подъём энергии",
+  semitone: "+7 — полутон вверх",
+  down: "−2",
+  diagonal: "Диагональ",
+  clash: "Конфликт",
+  unknown: "Тональность неизвестна",
+};
+
+function statRows(counts, names, total) {
+  return Object.entries(counts).map(([name, number]) => {
+    const share = total ? (number / total) * 100 : 0;
+    return el(
+      "div",
+      { class: "stat" },
+      el("span", {}, names[name] || name),
+      el("span", { class: "n" }, `${number} · ${Math.round(share)}%`),
+      el("div", { class: "meter" }, el("i", { style: `width: ${share}%` })),
+    );
+  });
+}
+
+function renderStats(stats) {
+  // Everything the radio has done, or this run if it keeps no history.
+  const data = stats.all_time || stats.session;
+  $("stats-card").hidden = !data.total;
+  if (!data.total) return;
+  $("stats-scope").textContent = stats.all_time ? "за всё время" : "с запуска";
+  $("stats").replaceChildren(
+    el("div", { class: "stats" },
+      el("h3", {}, "Тип"),
+      ...statRows(data.by_type, TRANSITIONS, data.total),
+      el("h3", {}, "По ритму"),
+      ...statRows({ matched: data.beat_matched, free: data.total - data.beat_matched },
+        { matched: "Биты совпали", free: "Без подгонки темпа" }, data.total),
+      el("h3", {}, "Смена тональности"),
+      ...statRows(data.by_key, KEY_CHANGES, data.total),
+    ),
+  );
+}
+
 function renderMoods(moods) {
   const key = JSON.stringify(moods);
   if (key === state.moodsKey) return; // keep the chips alive between polls
@@ -735,10 +794,11 @@ function renderAuth(auth) {
 let failures = 0;
 async function refresh() {
   try {
-    const [auth, queue] = await Promise.all([api("/api/auth"), api("/api/queue")]);
+    const [auth, queue, stats] = await Promise.all([api("/api/auth"), api("/api/queue"), api("/api/stats")]);
     failures = 0;
     renderAuth(auth);
     renderQueue(queue);
+    renderStats(stats);
     if (!state.busy) renderMoods(queue.moods);
     $("moods").querySelectorAll(".chip").forEach((chip) => { chip.disabled = !auth.authorized; });
   } catch (error) {

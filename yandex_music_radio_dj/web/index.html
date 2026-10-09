@@ -2,7 +2,9 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#fbf8ff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121318" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <title>Яндекс Музыка DJ</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='11' fill='%234355b9'/%3E%3Ccircle cx='12' cy='12' r='3' fill='white'/%3E%3C/svg%3E">
@@ -145,7 +147,7 @@ button { font-family: inherit; color: inherit; }
 /* Layout: one column on compact windows, two from 600dp */
 main {
   display: grid; gap: 16px;
-  max-width: 1040px; margin: 0 auto; padding: 8px 16px 48px;
+  max-width: 1040px; margin: 0 auto; padding: 8px 16px calc(48px + env(safe-area-inset-bottom));
   grid-template-columns: minmax(0, 1fr);
 }
 .column { display: grid; gap: 16px; align-content: start; }
@@ -216,18 +218,21 @@ main {
   font: var(--md-sys-typescale-label-large);
   letter-spacing: var(--md-sys-typescale-label-large-tracking);
 }
-.tag.key {
-  display: inline-block; margin-right: 8px; padding: 0 8px; border-radius: var(--md-sys-shape-corner-small);
-  border: 1px solid hsl(var(--key-hue) 60% 50%);
-  background: hsl(var(--key-hue) 60% 50% / 0.18);
-  color: var(--md-sys-color-on-surface);
-  font-weight: 600;
+/* Camelot key: the hue marks the place on the wheel (a decorative dot, the
+   code says it all), so neighbours on the wheel look alike. */
+.key::before {
+  content: ""; width: 8px; height: 8px; flex: none; border-radius: var(--md-sys-shape-corner-full);
+  background: hsl(var(--key-hue) 65% 50%);
 }
-.assist.key {
-  border-color: hsl(var(--key-hue) 60% 50%);
-  background: hsl(var(--key-hue) 60% 50% / 0.18);
-  color: var(--md-sys-color-on-surface);
-  font-weight: 600;
+.tag.key {
+  display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; padding: 0 8px;
+  border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-corner-small);
+  color: var(--md-sys-color-on-surface); font-weight: 600;
+}
+.assist.key { gap: 8px; color: var(--md-sys-color-on-surface); font-weight: 600; }
+.sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap;
 }
 .progress { display: grid; gap: 4px; }
 .bar { height: 4px; border-radius: var(--md-sys-shape-corner-full); background: var(--md-sys-color-secondary-container); overflow: hidden; }
@@ -316,11 +321,6 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
 }
 .empty { padding: 24px 0 8px; text-align: center; color: var(--md-sys-color-on-surface-variant); }
 
-.btn.tonal {
-  height: 32px; padding: 0 16px;
-  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);
-}
-.btn:disabled { opacity: 0.38; cursor: default; }
 .btn {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 40px; padding: 0 24px; border: 0; border-radius: var(--md-sys-shape-corner-full); cursor: pointer;
@@ -328,10 +328,19 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
   font: var(--md-sys-typescale-label-large);
   letter-spacing: var(--md-sys-typescale-label-large-tracking); text-decoration: none;
 }
+.btn.tonal {
+  height: 32px; padding: 0 16px;
+  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);
+}
+/* The touch target is 48dp tall whatever the button looks like */
+.btn::before { content: ""; position: absolute; inset: -4px 0; }
+.btn.tonal::before { inset: -8px 0; }
+.btn:disabled { opacity: 0.38; cursor: default; }
+.btn:disabled::after { display: none; }
 
 /* Snackbar */
 .snackbar {
-  position: fixed; left: 16px; right: 16px; bottom: 16px; z-index: 10;
+  position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 10;
   max-width: 560px; margin: 0 auto; padding: 14px 16px; border-radius: var(--md-sys-shape-corner-extra-small);
   background: var(--md-sys-color-inverse-surface); color: var(--md-sys-color-inverse-on-surface);
   box-shadow: 0 3px 8px 3px var(--md-elevation-shadow);
@@ -371,7 +380,7 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
 <header class="app-bar" id="app-bar">
   <svg class="icon logo" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-vinyl"/></svg>
   <h1>Яндекс Музыка DJ</h1>
-  <span class="live" id="live">Пауза</span>
+  <span class="live" id="live" role="status">Пауза</span>
   <button class="icon-button" id="theme" type="button" aria-label="Сменить тему">
     <svg class="icon" aria-hidden="true"><use href="#i-theme"/></svg>
   </button>
@@ -541,15 +550,15 @@ try {
 /* Rendering */
 function moodName(mood) { return MOODS[mood] || ""; }
 
-/* Camelot Wheel: the 12 numbers are hues round the wheel, so keys that mix
-   well (same number, +-1, A/B swap) look alike. */
+/* Camelot Wheel: the 12 numbers are hues round the wheel. */
 function keyChip(track, cls) {
   const hue = ((parseInt(track.camelot, 10) - 1) * 30) % 360;
-  return el("span", {
-    class: `${cls} key`,
-    title: `${track.key} (Camelot ${track.camelot})`,
-    style: `--key-hue: ${hue}`,
-  }, track.camelot);
+  return el(
+    "span",
+    { class: `${cls} key`, title: `${track.key} (Camelot ${track.camelot})`, style: `--key-hue: ${hue}` },
+    track.camelot,
+    el("span", { class: "sr" }, `, ${track.key}`),
+  );
 }
 
 function renderNow(now) {

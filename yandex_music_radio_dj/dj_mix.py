@@ -361,8 +361,14 @@ def _profile_key(mono: Pcm) -> tuple[int, float]:
 
 
 def _essentia_key(mono: Pcm) -> int:
-    """Key by Essentia, with the profile made for electronic music."""
-    name, scale, strength = _KEY_EXTRACTOR(mono)
+    """Key by Essentia, with the profile made for electronic music.
+
+    -1 when Essentia has no answer: it gave no key, or failed.
+    """
+    try:
+        name, scale, strength = _KEY_EXTRACTOR(mono)
+    except RuntimeError:
+        return -1
     note = _ESSENTIA_NOTES.get(name)
     if note is None or not strength:
         return -1
@@ -374,14 +380,17 @@ def estimate_key(mono: Pcm) -> int:
 
     Essentia tells the key much better than the plain profile match
     (see README) but always names one, even for noise, so the plain
-    match decides whether the track has a tonal centre at all. Without
-    Essentia the plain match gives the key too.
+    match decides first whether the track has a tonal centre at all. The
+    key is then Essentia's; where Essentia has no answer, or is not
+    installed, it is the key of the plain match.
     """
     key, confidence = _profile_key(mono)
     if confidence < MIN_KEY_CONFIDENCE:
         return -1
     if _KEY_EXTRACTOR is not None:
-        return _essentia_key(mono)
+        found = _essentia_key(mono)
+        if found >= 0:
+            return found
     return key
 
 

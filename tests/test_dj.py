@@ -1536,3 +1536,27 @@ def test_key_quality() -> None:
     assert dj_mix.key_quality("nonsense") == "unknown"
     assert dj_mix.camelot_key("8A") == key_of("8A")
     assert dj_mix.camelot_key("") == -1
+
+
+def test_key_falls_back_to_the_plain_match_when_essentia_has_no_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    track_pcm = chord_track(9, minor=True)
+    plain, _ = dj_mix._profile_key(track_pcm)
+    assert plain >= 0
+
+    monkeypatch.setattr(dj_mix, "_essentia_key", lambda _: -1)
+
+    assert dj_mix.estimate_key(track_pcm) == plain
+
+
+def test_essentia_failure_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    if dj_mix.key_detector() != "essentia":
+        pytest.skip("Essentia is not installed")
+
+    def fail(_: object) -> None:
+        raise RuntimeError("no key")
+
+    monkeypatch.setattr(dj_mix, "_KEY_EXTRACTOR", fail)
+
+    assert dj_mix._essentia_key(chord_track(9, minor=True)) == -1

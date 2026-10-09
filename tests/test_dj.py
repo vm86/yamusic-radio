@@ -1257,3 +1257,15 @@ def test_next_track_is_picked_by_the_wheel() -> None:
     pool = [keyed("2A"), keyed("8B"), keyed("5B")]
 
     assert dj_mix.choose_next(now, pool) == 1
+
+
+def test_estimate_key_without_essentia(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dj_mix, "_KEY_EXTRACTOR", None)
+    assert dj_mix.key_detector() == "chroma profiles"
+
+    # The plain match gets the keys that are not close to a neighbour.
+    key = dj_mix.estimate_key(chord_track(9, minor=True))
+
+    assert key >= 0
+    noise = np.random.default_rng(2).normal(0, 0.1, 20 * SR)
+    assert dj_mix.estimate_key(noise.astype(np.float32)) == -1

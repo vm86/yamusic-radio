@@ -236,6 +236,7 @@ class Radio:
         mood_arc: bool = False,
         cache: TrackCache | None = None,
     ) -> None:
+        log.info("Keys are found by %s", dj_mix.key_detector())
         self._player = player
         self._cache = cache
         self._session = session

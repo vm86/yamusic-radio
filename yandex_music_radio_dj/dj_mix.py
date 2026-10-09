@@ -196,6 +196,30 @@ _MINOR_PROFILE = np.array(
 )
 
 
+try:
+    import essentia.standard as _essentia
+
+    _KEY_EXTRACTOR = _essentia.KeyExtractor(
+        profileType="edma", sampleRate=SAMPLE_RATE
+    )
+except ImportError:
+    _KEY_EXTRACTOR = None
+# Essentia spells the flats; the sharps are in NOTES.
+_ESSENTIA_NOTES = {
+    **{name: i for i, name in enumerate(NOTES)},
+    "Db": 1,
+    "Eb": 3,
+    "Gb": 6,
+    "Ab": 8,
+    "Bb": 10,
+}
+
+
+def key_detector() -> str:
+    """Name of what finds the keys: "essentia" or "chroma profiles"."""
+    return "chroma profiles" if _KEY_EXTRACTOR is None else "essentia"
+
+
 def camelot_code(key: int) -> str:
     """Camelot Wheel code of a key as numbered in TrackAnalysis.key."""
     if not 0 <= key < KEYS:
@@ -275,21 +299,46 @@ def chroma(mono: Pcm) -> npt.NDArray[np.float64]:
     return total
 
 
-def estimate_key(mono: Pcm) -> int:
-    """Key of the track (see TrackAnalysis.key), -1 if there is none."""
+def _profile_key(mono: Pcm) -> tuple[int, float]:
+    """Return the key whose profile fits the chroma best, and how well."""
     profile = chroma(mono)
     if not profile.any():
-        return -1
-    best, best_score = -1, MIN_KEY_CONFIDENCE
+        return -1, 0.0
+    best, best_score = -1, 0.0
     for offset, reference in (
         (0, _MAJOR_PROFILE),
         (PITCH_CLASSES, _MINOR_PROFILE),
     ):
-        for tonic in range(12):
+        for tonic in range(PITCH_CLASSES):
             score = float(np.corrcoef(profile, np.roll(reference, tonic))[0, 1])
             if score > best_score:
                 best, best_score = offset + tonic, score
-    return best
+    return best, best_score
+
+
+def _essentia_key(mono: Pcm) -> int:
+    """Key by Essentia, with the profile made for electronic music."""
+    name, scale, strength = _KEY_EXTRACTOR(mono)
+    note = _ESSENTIA_NOTES.get(name)
+    if note is None or not strength:
+        return -1
+    return note + (PITCH_CLASSES if scale == "minor" else 0)
+
+
+def estimate_key(mono: Pcm) -> int:
+    """Key of the track (see TrackAnalysis.key), -1 if there is none.
+
+    Essentia tells the key much better than the plain profile match
+    (see README) but always names one, even for noise, so the plain
+    match decides whether the track has a tonal centre at all. Without
+    Essentia the plain match gives the key too.
+    """
+    key, confidence = _profile_key(mono)
+    if confidence < MIN_KEY_CONFIDENCE:
+        return -1
+    if _KEY_EXTRACTOR is not None:
+        return _essentia_key(mono)
+    return key
 
 
 def onset_envelope(mono: Pcm) -> npt.NDArray[np.float32]:

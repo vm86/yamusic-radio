@@ -1,12 +1,11 @@
 # ruff: noqa: S101, PLR2004
 from __future__ import annotations
 
-import dataclasses
 import json
 from typing import TYPE_CHECKING
 
 from yandex_music_radio_dj.cache import MAX_ROWS, TrackCache
-from yandex_music_radio_dj.dj_mix import TrackAnalysis
+from yandex_music_radio_dj.dj_mix import TrackAnalysis, key_detector
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,12 +81,19 @@ def test_prune_drops_least_recently_used(
     assert MAX_ROWS > 3
 
 
-def test_analysis_without_key_is_analyzed_again(
+def test_analysis_with_an_unknown_key_detector_is_analyzed_again(
     track_cache: TrackCache,
 ) -> None:
     cache = track_cache
     cache.put_analysis("1", "mp3", "A - B", ANALYSIS)
-    old = {k: v for k, v in dataclasses.asdict(ANALYSIS).items() if k != "key"}
-    cache._db.execute("UPDATE tracks SET analysis = ?", (json.dumps(old),))  # noqa: SLF001
+    stored = json.loads(
+        cache._db.execute("SELECT analysis FROM tracks").fetchone()[0]  # noqa: SLF001
+    )
+    assert stored["key_by"] == key_detector()
 
-    assert cache.get_analysis("1", "mp3") is None
+    for key_by in (None, "something else"):
+        stored["key_by"] = key_by
+        cache._db.execute(  # noqa: SLF001
+            "UPDATE tracks SET analysis = ?", (json.dumps(stored),)
+        )
+        assert cache.get_analysis("1", "mp3") is None

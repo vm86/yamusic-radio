@@ -16,8 +16,10 @@ RUN dnf install -y --setopt=install_weak_deps=False python3 python3-pip \
 WORKDIR /src
 COPY pyproject.toml LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yandex_music_radio_dj ./yandex_music_radio_dj
+# Essentia finds the keys; it has wheels for x86_64 only, elsewhere the
+# program falls back to a simpler (and worse) key detection.
 RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install .
+    && (/opt/venv/bin/pip install ".[key]" || /opt/venv/bin/pip install .)
 
 
 FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
@@ -26,7 +28,7 @@ FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 # from RPM Fusion.
 RUN dnf install -y --setopt=install_weak_deps=False \
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-    && dnf install -y --setopt=install_weak_deps=False python3 ffmpeg \
+    && dnf install -y --setopt=install_weak_deps=False python3 ffmpeg libatomic \
     && dnf clean all \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame \
     && useradd --system --uid 10001 --create-home --home-dir /home/radio radio \

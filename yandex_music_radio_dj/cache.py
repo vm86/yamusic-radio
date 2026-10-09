@@ -14,7 +14,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from yandex_music_radio_dj.dj_mix import TrackAnalysis
+from yandex_music_radio_dj.dj_mix import TrackAnalysis, key_detector
 
 log = logging.getLogger(__name__)
 
@@ -58,8 +58,9 @@ class TrackCache:
             return None
         try:
             fields = json.loads(row[0])
-            if "key" not in fields:
-                # Stored before the key was analyzed: analyze again.
+            if fields.pop("key_by", None) != key_detector():
+                # The key was not analyzed, or by something worse: analyze
+                # the track again.
                 return None
             return TrackAnalysis(**fields)
         except (TypeError, ValueError):
@@ -84,7 +85,9 @@ class TrackCache:
                 track_id,
                 codec,
                 title,
-                json.dumps(dataclasses.asdict(analysis)),
+                json.dumps(
+                    {**dataclasses.asdict(analysis), "key_by": key_detector()}
+                ),
                 now,
             ),
         )

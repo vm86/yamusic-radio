@@ -9,6 +9,8 @@ export interface TrackInfo {
   camelot: string;
   key: string;
   decided: boolean;
+  /** The cover's URL with %% where the size goes, "" if there is none. */
+  cover: string;
 }
 
 export interface NowTrack extends TrackInfo {

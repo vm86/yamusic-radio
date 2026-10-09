@@ -5,6 +5,7 @@ import { MOODS } from "../constants";
 import { clock } from "../format";
 import Icon from "./Icon.vue";
 import KeyTag from "./KeyTag.vue";
+import VinylRecord from "./VinylRecord.vue";
 
 const props = defineProps<{
   now: NowTrack | null;
@@ -28,8 +29,8 @@ const progress = computed(() => {
 
 <template>
   <section class="card player">
-    <div class="cover" aria-hidden="true">
-      <svg class="vinyl" :class="{ spinning: playing }" viewBox="0 0 100 100"><use href="#i-vinyl" /></svg>
+    <div class="cover">
+      <VinylRecord :cover="now?.cover ?? ''" :spinning="playing" />
     </div>
     <div class="meta" aria-live="polite" aria-atomic="true">
       <h2 class="title">{{ title }}</h2>
@@ -88,8 +89,7 @@ const progress = computed(() => {
   display: grid; place-items: center; color: var(--md-sys-color-on-primary-container);
   overflow: hidden;
 }
-.vinyl { width: 72%; height: 72%; }
-.vinyl.spinning { animation: spin var(--app-motion-spin) var(--md-sys-motion-easing-linear) infinite; }
+.cover > * { width: 78%; }
 .meta { text-align: center; min-width: 0; }
 .title {
   font: var(--md-sys-typescale-headline-small);

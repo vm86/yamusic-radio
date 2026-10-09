@@ -102,6 +102,20 @@ def is_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+def cover_template(track: ExtendTrack | None) -> str:
+    """Return the URL of the cover with %% where the size goes, or "".
+
+    Yandex serves a cover in any size ("100x100", "400x400", ...) from one
+    address; the page picks the size it needs.
+    """
+    if track is None:
+        return ""
+    uri = getattr(track, "cover_uri", None) or getattr(track, "og_image", None)
+    if not isinstance(uri, str) or not uri:
+        return ""
+    return uri if uri.startswith("http") else f"https://{uri}"
+
+
 @dataclass(frozen=True, slots=True)
 class TrackInfo:
     """A track as the API shows it."""
@@ -118,6 +132,8 @@ class TrackInfo:
     key: str = ""
     # False for the tracks of a forecast: the radio may still change them.
     decided: bool = True
+    # The cover's URL, "%%" for the size; "" when there is none.
+    cover: str = ""
 
     @classmethod
     def of(
@@ -140,6 +156,7 @@ class TrackInfo:
             analysis.camelot,
             analysis.key_name,
             decided,
+            cover_template(track),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -154,6 +171,7 @@ class TrackInfo:
             "camelot": self.camelot,
             "key": self.key,
             "decided": self.decided,
+            "cover": self.cover,
         }
 
 

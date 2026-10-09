@@ -1654,3 +1654,40 @@ async def test_a_failed_mix_starts_again(
 
     assert len(calls) == 3
     assert pauses == [dj.RESTART_SECONDS] * 2
+
+
+def test_cover_template_gets_https_and_keeps_the_size_placeholder() -> None:
+    track = FakeTrack("a")
+    assert dj.cover_template(None) == ""
+    assert dj.cover_template(track) == ""  # a track without a cover
+
+    track.cover_uri = "avatars.yandex.net/get-music-content/1/abc/%%"
+    assert dj.cover_template(track) == (
+        "https://avatars.yandex.net/get-music-content/1/abc/%%"
+    )
+
+    track.cover_uri = None
+    track.og_image = "https://avatars.yandex.net/get-music-content/2/x/%%"
+    assert dj.cover_template(track) == track.og_image
+
+
+@pytest.mark.asyncio
+async def test_queue_gives_the_cover_of_each_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracks = [FakeTrack(n) for n in "abc"]
+    tracks[0].cover_uri = "avatars.yandex.net/x/%%"
+    radio = make_radio(tmp_path, monkeypatch, FakePlayer([tracks]), {})
+    await radio.fill(3)
+    deck = await radio.next_deck(None)
+    radio.started(deck)
+
+    queue = radio.queue()
+
+    listed = [queue["now"], *queue["next"]]  # type: ignore[misc,list-item]
+    covers = {t["track_id"]: t["cover"] for t in listed}  # type: ignore[index]
+    assert covers == {
+        "a": "https://avatars.yandex.net/x/%%",
+        "b": "",
+        "c": "",
+    }

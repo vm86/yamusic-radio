@@ -109,6 +109,14 @@ UNKNOWN_TEMPO_COST = 2.5  # on top of UNMATCHED_COST
 SWEEP_COST = 1.0  # a filter sweep instead of a bass swap
 PLAIN_LENGTH_COST = 0.5  # no intro/outro to size the blend by
 LOUDNESS_COST = 0.1  # per dB
+# Harmonic mixing on the Camelot Wheel, see key_cost.
+KEY_COST_SCALE = 1.0
+KEY_NEIGHBOUR_COST = 0.3  # one step round the wheel, or the relative key
+KEY_BOOST_COST = 1.2  # two steps up: the energy goes up with the key
+KEY_SEMITONE_COST = 1.5  # seven steps up: the key goes up a semitone
+KEY_DOWN_COST = 1.8  # two steps down
+KEY_DIAGONAL_COST = 2.5  # a step round the wheel and the other mode
+KEY_CLASH_COST = 4.0  # keys that clash
 REPEAT_ARTIST_COST = 6.0
 ENERGY_ARC_COST = 3.0  # per unit of distance from the target energy
 # A next track costing more than this doesn't really fit: look for others.
@@ -205,6 +213,38 @@ def key_name(key: int) -> str:
         return ""
     mode = "minor" if key >= PITCH_CLASSES else "major"
     return f"{NOTES[key % PITCH_CLASSES]} {mode}"
+
+
+def key_cost(current: int, following: int) -> float:
+    """Cost of a key change by the rules of harmonic mixing.
+
+    On the Camelot Wheel a track blends cleanly into the same key, the
+    keys one step round the wheel (a fifth up or down) and the relative
+    key (the same number, the other letter). Two steps up lifts the
+    energy, seven steps up raises the key by a semitone; both are
+    allowed and cost a little. Anything else clashes. Nothing is known
+    about a key that was not detected, so it costs nothing.
+    """
+    now, then = camelot_code(current), camelot_code(following)
+    if not now or not then:
+        return 0.0
+    steps = (int(then[:-1]) - int(now[:-1])) % 12
+    if now[-1] == then[-1]:
+        costs = {
+            0: 0.0,
+            1: KEY_NEIGHBOUR_COST,
+            11: KEY_NEIGHBOUR_COST,
+            2: KEY_BOOST_COST,
+            7: KEY_SEMITONE_COST,
+            10: KEY_DOWN_COST,
+        }
+    else:
+        costs = {
+            0: KEY_NEIGHBOUR_COST,
+            1: KEY_DIAGONAL_COST,
+            11: KEY_DIAGONAL_COST,
+        }
+    return KEY_COST_SCALE * costs.get(steps, KEY_CLASH_COST)
 
 
 def chroma(mono: Pcm) -> npt.NDArray[np.float64]:
@@ -919,6 +959,7 @@ def transition_cost(
     if section_length(current, playing) is None:
         cost += PLAIN_LENGTH_COST
     cost += LOUDNESS_COST * abs(current.loudness_db - following.loudness_db)
+    cost += key_cost(current.key, following.key)
     return cost, playing
 
 

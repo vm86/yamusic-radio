@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 from typing import TYPE_CHECKING
 
@@ -1209,3 +1210,50 @@ async def test_track_file_is_removed_when_the_track_is_heard(
     radio.started(deck)
 
     assert not (tmp_path / "a.mp3").exists()
+
+
+def key_of(code: str) -> int:
+    """Return the number of the key (see TrackAnalysis.key) of a Camelot code."""
+    return next(k for k in range(24) if dj_mix.camelot_code(k) == code)
+
+
+@pytest.mark.parametrize(
+    ("now", "then", "cost"),
+    [
+        ("8A", "8A", 0.0),
+        ("8A", "9A", dj_mix.KEY_NEIGHBOUR_COST),
+        ("8A", "7A", dj_mix.KEY_NEIGHBOUR_COST),
+        ("1A", "12A", dj_mix.KEY_NEIGHBOUR_COST),  # round the wheel
+        ("8A", "8B", dj_mix.KEY_NEIGHBOUR_COST),  # the relative key
+        ("8A", "10A", dj_mix.KEY_BOOST_COST),
+        ("8A", "3A", dj_mix.KEY_SEMITONE_COST),
+        ("8A", "6A", dj_mix.KEY_DOWN_COST),
+        ("8A", "9B", dj_mix.KEY_DIAGONAL_COST),
+        ("8A", "2A", dj_mix.KEY_CLASH_COST),
+        ("8A", "3B", dj_mix.KEY_CLASH_COST),
+    ],
+)
+def test_key_cost_follows_the_camelot_rules(
+    now: str, then: str, cost: float
+) -> None:
+    assert dj_mix.key_cost(key_of(now), key_of(then)) == cost
+
+
+def test_key_cost_of_an_unknown_key_is_zero() -> None:
+    assert dj_mix.key_cost(-1, key_of("8A")) == 0
+    assert dj_mix.key_cost(key_of("8A"), -1) == 0
+
+
+def test_next_track_is_picked_by_the_wheel() -> None:
+    def keyed(code: str) -> dj_mix.Entry:
+        entry = track(120)
+        return dj_mix.Entry(
+            dataclasses.replace(entry.analysis, key=key_of(code)),
+            entry.artists,
+            entry.mood,
+        )
+
+    now = dataclasses.replace(track(120).analysis, key=key_of("8A"))
+    pool = [keyed("2A"), keyed("8B"), keyed("5B")]
+
+    assert dj_mix.choose_next(now, pool) == 1

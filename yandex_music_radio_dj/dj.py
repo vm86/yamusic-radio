@@ -752,9 +752,10 @@ class Radio:
                 self._unpick(deck)
                 continue
             log.info(
-                "Next: %s (%.1f BPM%s)",
+                "Next: %s (%.1f BPM, key %s%s)",
                 candidate.title,
                 deck.analysis.bpm,
+                deck.analysis.camelot or "?",
                 ", beat-matched" if speed else "",
             )
             self._next = deck

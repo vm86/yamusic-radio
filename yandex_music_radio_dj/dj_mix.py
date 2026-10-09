@@ -110,7 +110,7 @@ SWEEP_COST = 1.0  # a filter sweep instead of a bass swap
 PLAIN_LENGTH_COST = 0.5  # no intro/outro to size the blend by
 LOUDNESS_COST = 0.1  # per dB
 # Harmonic mixing on the Camelot Wheel, see key_cost.
-KEY_COST_SCALE = 1.0
+KEY_COST_SCALE = 0.7
 KEY_NEIGHBOUR_COST = 0.3  # one step round the wheel, or the relative key
 KEY_BOOST_COST = 1.2  # two steps up: the energy goes up with the key
 KEY_SEMITONE_COST = 1.5  # seven steps up: the key goes up a semitone
@@ -118,7 +118,7 @@ KEY_DOWN_COST = 1.8  # two steps down
 KEY_DIAGONAL_COST = 2.5  # a step round the wheel and the other mode
 KEY_CLASH_COST = 4.0  # keys that clash
 REPEAT_ARTIST_COST = 6.0
-ENERGY_ARC_COST = 3.0  # per unit of distance from the target energy
+ENERGY_ARC_COST = 8.0  # per unit of distance from the target energy
 # A next track costing more than this doesn't really fit: look for others.
 SUITABLE_COST = 5.0
 

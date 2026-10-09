@@ -1236,7 +1236,9 @@ def key_of(code: str) -> int:
 def test_key_cost_follows_the_camelot_rules(
     now: str, then: str, cost: float
 ) -> None:
-    assert dj_mix.key_cost(key_of(now), key_of(then)) == cost
+    assert dj_mix.key_cost(key_of(now), key_of(then)) == pytest.approx(
+        cost * dj_mix.KEY_COST_SCALE
+    )
 
 
 def test_key_cost_of_an_unknown_key_is_zero() -> None:
@@ -1269,3 +1271,14 @@ def test_estimate_key_without_essentia(monkeypatch: pytest.MonkeyPatch) -> None:
     assert key >= 0
     noise = np.random.default_rng(2).normal(0, 0.1, 20 * SR)
     assert dj_mix.estimate_key(noise.astype(np.float32)) == -1
+
+
+def test_energy_arc_is_not_given_up_for_the_key() -> None:
+    """A clash of keys costs less than a track far from the energy wanted."""
+    clash = dj_mix.KEY_COST_SCALE * dj_mix.KEY_CLASH_COST
+    worst_arc = dj_mix.ENERGY_ARC_COST * 0.7  # the arc swings by 0.7
+
+    assert clash < worst_arc
+    assert dj_mix.ENERGY_ARC_COST * 0.25 > dj_mix.KEY_COST_SCALE * (
+        dj_mix.KEY_DIAGONAL_COST
+    )

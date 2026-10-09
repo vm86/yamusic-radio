@@ -68,6 +68,8 @@ PREPARE_CONCURRENCY = 3
 MAX_EMPTY_BATCHES = 5
 # Batches of the station with nothing of the wanted genres in a row.
 MAX_OFF_GENRE_BATCHES = 20
+# Pause before the mix starts again after a failure.
+RESTART_SECONDS = 5
 # When no track in the pool fits the one playing, load this many more...
 EXTRA_TRACKS = 3
 # ...up to this many, and take the best there is after that.
@@ -972,6 +974,9 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
                 min(
                     length,
                     current.analysis.end - blend_start,
+                    # The decoded track may be a few samples shorter than
+                    # its analysis says (tempo change, rounding).
+                    len(current.pcm) - blend_start,
                     len(following.pcm) - following_start,
                 ),
             )
@@ -987,15 +992,28 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
             )
             log.info("Transition: %s", kind.value)
             radio.transition(kind, current, following)
-            # The filtering takes a while, don't stall the event loop with it.
-            blended = await asyncio.to_thread(
-                dj_mix.blend,
-                kind,
-                current.pcm[blend_start : blend_start + length],
-                following.pcm[following_start : following_start + length],
-                current.analysis.beat_period if following.beat_matched else 0,
-                effects=effects,
+            outgoing = current.pcm[blend_start : blend_start + length]
+            incoming = following.pcm[following_start : following_start + length]
+            # The pieces must be equally long, whatever the analysis says.
+            length = min(len(outgoing), len(incoming))
+            outgoing, incoming = outgoing[:length], incoming[:length]
+            beat_period = (
+                current.analysis.beat_period if following.beat_matched else 0
             )
+            # The filtering takes a while, don't stall the event loop with it.
+            try:
+                blended = await asyncio.to_thread(
+                    dj_mix.blend,
+                    kind,
+                    outgoing,
+                    incoming,
+                    beat_period,
+                    effects=effects,
+                )
+            except Exception:
+                # A broken blend must not end the stream: fade instead.
+                log.exception("Blend failed (%s), crossfading", kind.value)
+                blended = dj_mix.crossfade(outgoing, incoming)
             radio.started(following)
             half = length // 2
             for piece in _pieces(blended[:half], current.title):
@@ -1297,6 +1315,24 @@ async def _encode_loop(radio: Radio, hub: Broadcaster, effects: float) -> None:
         await proc.wait()
 
 
+async def _encode_forever(
+    radio: Radio, hub: Broadcaster, effects: float
+) -> None:
+    """Keep the mix going: a failure ends only the mix it happened in."""
+    while True:
+        try:
+            await _encode_loop(radio, hub, effects)
+        except CancelledError:
+            raise
+        except Exception:
+            log.exception(
+                "The mix failed, starting it again in %ds", RESTART_SECONDS
+            )
+            await sleep(RESTART_SECONDS)
+        else:
+            return
+
+
 async def serve(
     player: YandexMusicPlayer,
     session: ClientSession,
@@ -1344,7 +1380,7 @@ async def serve(
                 raise RuntimeError("The station gave no playable tracks")
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
-                await _encode_loop(radio, hub, EFFECT_LEVELS[effects])
+                await _encode_forever(radio, hub, EFFECT_LEVELS[effects])
             finally:
                 refill.cancel()
                 with contextlib.suppress(CancelledError):

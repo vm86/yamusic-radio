@@ -1575,3 +1575,74 @@ def test_essentia_failure_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dj_mix, "_KEY_EXTRACTOR", fail)
 
     assert dj_mix._essentia_key(chord_track(9, minor=True)) == -1
+
+
+async def play_all(radio: FakeRadio) -> list[tuple[np.ndarray, str]]:
+    pieces: list[tuple[np.ndarray, str]] = []
+
+    async def play() -> None:
+        async for piece in dj.mix(radio):
+            pieces.append(piece)  # noqa: PERF401
+
+    with pytest.raises(RuntimeError, match="out of tracks"):
+        await play()
+    return pieces
+
+
+@pytest.mark.asyncio
+async def test_mix_copes_with_a_track_shorter_than_its_analysis() -> None:
+    first = deck("one", 120, 0.3, matched=True)
+    # The decoded track came out a few hundred samples short.
+    first.analysis = dataclasses.replace(
+        first.analysis, end=first.analysis.end + 321
+    )
+    radio = FakeRadio([first, deck("two", 120, 0.17, matched=True)])
+
+    pieces = await play_all(radio)
+
+    assert {title for _, title in pieces} == {"one", "two"}
+    assert np.isfinite(np.concatenate([pcm for pcm, _ in pieces])).all()
+
+
+@pytest.mark.asyncio
+async def test_mix_fades_when_a_blend_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_: object, **__: object) -> np.ndarray:
+        raise ValueError("operands could not be broadcast together")
+
+    monkeypatch.setattr(dj_mix, "blend", broken)
+    radio = FakeRadio(
+        [
+            deck("one", 120, 0.3, matched=True),
+            deck("two", 120, 0.17, matched=True),
+        ]
+    )
+
+    pieces = await play_all(radio)
+
+    assert {title for _, title in pieces} == {"one", "two"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_mix_starts_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    pauses = []
+
+    async def loop(*_: object) -> None:
+        calls.append(1)
+        if len(calls) < 3:
+            raise ValueError("boom")
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(dj, "_encode_loop", loop)
+    monkeypatch.setattr(dj, "sleep", pause)
+
+    await dj._encode_forever(None, None, 0.0)  # type: ignore[arg-type]
+
+    assert len(calls) == 3
+    assert pauses == [dj.RESTART_SECONDS] * 2

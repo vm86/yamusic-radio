@@ -1213,7 +1213,7 @@ async def test_track_file_is_removed_when_the_track_is_heard(
 
 
 def key_of(code: str) -> int:
-    """Return the number of the key (see TrackAnalysis.key) of a Camelot code."""
+    """Return the key number (see TrackAnalysis.key) of a Camelot code."""
     return next(k for k in range(24) if dj_mix.camelot_code(k) == code)
 
 

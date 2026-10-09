@@ -316,6 +316,11 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
 }
 .empty { padding: 24px 0 8px; text-align: center; color: var(--md-sys-color-on-surface-variant); }
 
+.btn.tonal {
+  height: 32px; padding: 0 16px;
+  background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);
+}
+.btn:disabled { opacity: 0.38; cursor: default; }
 .btn {
   position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   height: 40px; padding: 0 24px; border: 0; border-radius: var(--md-sys-shape-corner-full); cursor: pointer;
@@ -420,8 +425,9 @@ input[type="range"]::-moz-range-thumb { width: 4px; height: 44px; border-radius:
     <section class="card">
       <div class="card-head">
         <h2>Дальше</h2>
-        <span class="hint">пунктиром — прогноз, он может поменяться</span>
+        <button class="btn tonal" id="refresh" type="button">Обновить очередь</button>
       </div>
+      <p class="hint">пунктиром — прогноз, он может поменяться</p>
       <ul class="list" id="next"></ul>
     </section>
   </div>
@@ -518,6 +524,7 @@ volume.addEventListener("input", applyVolume);
 applyVolume();
 
 /* Theme */
+$("refresh").addEventListener("click", refreshQueue);
 $("theme").addEventListener("click", () => {
   const root = document.documentElement;
   const dark = root.dataset.theme
@@ -660,6 +667,20 @@ function renderMoods(moods) {
         setMoods([...next]);
       }),
     );
+  }
+}
+
+async function refreshQueue() {
+  const button = $("refresh");
+  button.disabled = true;
+  try {
+    const queue = await api("/api/queue/refresh", { method: "POST" });
+    renderQueue(queue);
+    toast("Очередь пересобрана из загруженных треков");
+  } catch (error) {
+    toast("Не удалось обновить очередь: " + error.message);
+  } finally {
+    button.disabled = false;
   }
 }
 

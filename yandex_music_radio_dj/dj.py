@@ -185,6 +185,11 @@ class Deck:
     beat_matched: bool
     track: ExtendTrack | None = None
     mood: str = ""
+    # The downloaded track it was made from, kept until the deck is heard
+    # so that the deck can go back to the pool (see Radio.refresh_queue).
+    source: Candidate | None = None
+    # Radio.generation when the deck was chosen.
+    generation: int = 0
 
 
 async def decode_file(path: Path, speed: float = 1.0) -> Pcm:
@@ -264,6 +269,9 @@ class Radio:
         self._seen: set[str] = set()
         if cache is not None:
             self._seen |= cache.recently_played(CACHED_PLAYED_SKIPPED)
+        # Counts the rebuilds of the queue: a deck chosen before the last
+        # one is stale.
+        self._generation = 0
         self._slots = Semaphore(PREPARE_CONCURRENCY)
         self._load_lock = Lock()
         self._feedback_tasks: set[Task[None]] = set()
@@ -336,6 +344,47 @@ class Radio:
         log.info("Moods played: %s", ", ".join(wanted) or "any")
         # Wake up the refill: the pool may be short of tracks now.
         self._consumed.set()
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def refresh_queue(self) -> None:
+        """Choose the next tracks anew among the ones already loaded.
+
+        The track that was already chosen and decoded goes back to the
+        pool, tracks of moods that are not wanted are dropped, and the
+        next track is picked again, so the queue follows the moods
+        selected now. Nothing is downloaded for it.
+        """
+        self._generation += 1
+        deck, self._next = self._next, None
+        if deck is not None:
+            self._unpick(deck)
+        self._drop_unwanted()
+        log.info("Queue rebuilt from %d loaded tracks", len(self._pool))
+        # Wake up the refill: the pool may be short of tracks now.
+        self._consumed.set()
+
+    def is_stale(self, deck: Deck) -> bool:
+        """Say whether the queue was rebuilt after the deck was chosen."""
+        return deck.generation != self._generation
+
+    def _unpick(self, deck: Deck) -> None:
+        """Take back the choice of a deck that has not been heard yet."""
+        source = deck.source
+        if source is None:
+            return
+        if self._history and self._history[-1] == source.artists:
+            self._history.pop()
+        self._position = max(0, self._position - 1)
+        track = source.track
+        if track is not None:
+            self._played.pop(track.track_id, None)
+            now = self._now.track if self._now is not None else None
+            self._playing_id = now.track_id if now is not None else ""
+        if source.path.exists():
+            self._pool.append(source)
 
     def _drop_unwanted(self) -> None:
         """Forget the pool tracks that were fetched for other moods."""
@@ -674,34 +723,42 @@ class Radio:
 
     async def next_deck(self, current: TrackAnalysis | None) -> Deck:
         """Choose, tempo-match and decode the track to play after current."""
-        candidate = await self._pick(current)
-        self._mark_played(candidate)
-        self._consumed.set()
+        while True:
+            generation = self._generation
+            candidate = await self._pick(current)
+            self._mark_played(candidate)
+            self._consumed.set()
 
-        speed = 0.0
-        if current is not None:
-            speed = dj_mix.transition_speed(current.bpm, candidate.analysis)
-        try:
-            pcm = await decode_file(candidate.path, speed or 1.0)
-        finally:
-            candidate.path.unlink(missing_ok=True)
-        analysis = dj_mix.stretched(candidate.analysis, speed or 1.0)
-        log.info(
-            "Next: %s (%.1f BPM%s)",
-            candidate.title,
-            analysis.bpm,
-            ", beat-matched" if speed else "",
-        )
-        deck = Deck(
-            candidate.title,
-            pcm,
-            analysis,
-            beat_matched=bool(speed),
-            track=candidate.track,
-            mood=candidate.mood,
-        )
-        self._next = deck
-        return deck
+            speed = 0.0
+            if current is not None:
+                speed = dj_mix.transition_speed(current.bpm, candidate.analysis)
+            try:
+                pcm = await decode_file(candidate.path, speed or 1.0)
+            except BaseException:
+                candidate.path.unlink(missing_ok=True)
+                raise
+            deck = Deck(
+                candidate.title,
+                pcm,
+                dj_mix.stretched(candidate.analysis, speed or 1.0),
+                beat_matched=bool(speed),
+                track=candidate.track,
+                mood=candidate.mood,
+                source=candidate,
+                generation=generation,
+            )
+            if generation != self._generation:
+                # The queue was rebuilt while the track was decoded.
+                self._unpick(deck)
+                continue
+            log.info(
+                "Next: %s (%.1f BPM%s)",
+                candidate.title,
+                deck.analysis.bpm,
+                ", beat-matched" if speed else "",
+            )
+            self._next = deck
+            return deck
 
     def started(self, deck: Deck) -> None:
         """Tell the station the track has begun to be heard."""
@@ -716,6 +773,9 @@ class Radio:
             )
         self._now = deck
         self._now_since = time.monotonic()
+        if deck.source is not None:
+            deck.source.path.unlink(missing_ok=True)
+            deck.source = None
         if self._next is deck:
             self._next = None
         self._send_feedback(deck, "trackStarted", 0.0)
@@ -770,6 +830,9 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
             position = solo_end
 
             following = await following_task
+            while radio.is_stale(following):
+                # The queue was rebuilt: choose again.
+                following = await radio.next_deck(current.analysis)
             blend_start, following_start, length = dj_mix.plan_blend(
                 current.analysis,
                 following.analysis,
@@ -920,6 +983,10 @@ def add_api(app: web.Application, radio: Radio) -> None:
         await radio.set_allowed_moods(moods)
         return web.json_response(radio.moods_info())
 
+    async def refresh_queue(_: web.Request) -> web.Response:
+        radio.refresh_queue()
+        return web.json_response(radio.queue())
+
     async def delete_moods(_: web.Request) -> web.Response:
         need_token()
         await radio.set_allowed_moods([])
@@ -930,6 +997,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
     app.router.add_get("/api/moods", get_moods)
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
+    app.router.add_post("/api/queue/refresh", refresh_queue)
 
 
 def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:

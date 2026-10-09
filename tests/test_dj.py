@@ -180,6 +180,9 @@ class FakeRadio:
             raise RuntimeError("out of tracks")
         return self.decks.pop(0)
 
+    def is_stale(self, deck: dj.Deck) -> bool:
+        return False
+
     def started(self, deck: dj.Deck) -> None:
         self.events.append(("started", deck.title))
 
@@ -686,6 +689,7 @@ def make_radio(
         path.write_bytes(b"x")
 
     async def prepare(track: FakeTrack, mood: str = "") -> None:
+        (tmp_path / f"{track.track_id}.mp3").write_bytes(b"x")
         radio._pool.append(
             dj.Candidate(
                 track.title,
@@ -1124,3 +1128,84 @@ def test_camelot_wheel() -> None:
     assert dj_mix.camelot_code(12 + 9) == "8A"  # A minor
     assert dj_mix.camelot_code(-1) == ""
     assert dj_mix.key_name(12 + 6) == "F# minor"
+
+
+@pytest.mark.asyncio
+async def test_refresh_queue_puts_the_chosen_track_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(3)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+    assert len(radio.pool) == 1
+
+    radio.refresh_queue()
+
+    assert radio.is_stale(second)
+    assert len(radio.pool) == 2
+    assert second.title in [c.title for c in radio.pool]
+    assert list(radio.played) == [first.title]  # the choice is taken back
+    assert len(radio.upcoming(15)) == 2  # the forecast has it again
+
+    again = await radio.next_deck(first.analysis)
+    assert not radio.is_stale(again)
+    assert list(radio.played) == [first.title, again.title]
+
+
+@pytest.mark.asyncio
+async def test_refresh_queue_drops_tracks_of_other_moods(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(2)
+    for candidate, mood in zip(radio.pool, ("calm", "fun"), strict=True):
+        candidate.mood = mood
+    radio._allowed_moods = ("calm",)
+
+    radio.refresh_queue()
+
+    assert [c.mood for c in radio.pool] == ["calm"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_during_decoding_chooses_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(2)
+    decoded = []
+
+    async def decode(path: Path, speed: float = 1.0) -> np.ndarray:
+        decoded.append(path.name)
+        if len(decoded) == 1:
+            radio.refresh_queue()  # somebody pressed the button meanwhile
+        return np.zeros((SR, CHANNELS), np.float32)
+
+    monkeypatch.setattr(dj, "decode_file", decode)
+
+    result = await radio.next_deck(None)
+
+    assert len(decoded) == 2
+    assert not radio.is_stale(result)
+    assert list(radio.played) == [result.title]
+    assert len(radio.pool) == 1
+
+
+@pytest.mark.asyncio
+async def test_track_file_is_removed_when_the_track_is_heard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(1)
+    deck = await radio.next_deck(None)
+    assert (tmp_path / "a.mp3").exists()  # still needed to take it back
+
+    radio.started(deck)
+
+    assert not (tmp_path / "a.mp3").exists()

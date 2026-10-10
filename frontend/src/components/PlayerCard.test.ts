@@ -55,6 +55,24 @@ describe("PlayerCard next track button", () => {
     expect(button.attributes("title")).toBe("Ждём подходящий бит…");
   });
 
+  it("shows that it waits: a ring round the button and a chip, and nothing otherwise", async () => {
+    const waiting = card({ skipPending: true });
+    expect(waiting.find("button.skip .ring").exists()).toBe(true);
+    expect(waiting.find("button.skip").classes()).toContain("busy");
+    expect(waiting.get(".waiting-chip").text()).toBe("Ждём подходящий бит…");
+    // The chip is in the part that is read out loud.
+    expect(waiting.get(".meta").find(".waiting-chip").exists()).toBe(true);
+
+    const idle = card();
+    expect(idle.find(".ring").exists()).toBe(false);
+    expect(idle.find(".waiting-chip").exists()).toBe(false);
+    expect(idle.find("button.skip").classes()).not.toContain("busy");
+
+    await waiting.setProps({ skipPending: false });
+    expect(waiting.find(".ring").exists()).toBe(false);
+    expect(waiting.find(".waiting-chip").exists()).toBe(false);
+  });
+
   it("is off when nothing plays or the app is not authorized", () => {
     expect(skipButton(card({ canSkip: false })).attributes("disabled")).toBeDefined();
   });

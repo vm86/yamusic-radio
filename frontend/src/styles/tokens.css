@@ -79,6 +79,7 @@
   /* Not in the spec: how long the decorative loops take */
   --app-motion-spin: 8s;
   --app-motion-pulse: 1.6s;
+  --app-motion-ring: 1.4s;
 }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }

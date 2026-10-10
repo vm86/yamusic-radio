@@ -43,6 +43,8 @@ const progress = computed(() => {
         <KeyTag v-if="now.camelot" :camelot="now.camelot" :key-name="now.key" kind="assist" />
         <span v-if="MOODS[now.mood]" class="assist">{{ MOODS[now.mood] }}</span>
         <span class="assist">{{ Math.round(now.loudness_db) }} дБ</span>
+        <!-- The next track was asked for: the blend waits for a good beat. -->
+        <span v-if="skipPending" class="assist waiting-chip">Ждём подходящий бит…</span>
       </div>
     </div>
     <div class="progress">
@@ -67,7 +69,8 @@ const progress = computed(() => {
         <Icon :name="playing ? 'pause' : 'play'" />
       </button>
       <button
-        class="icon-button"
+        class="icon-button skip"
+        :class="{ busy: skipPending }"
         type="button"
         :disabled="!canSkip || skipPending"
         :aria-busy="skipPending"
@@ -75,7 +78,11 @@ const progress = computed(() => {
         :aria-label="skipPending ? 'Ждём подходящий бит' : 'Следующий трек'"
         @click="$emit('skip')"
       >
-        <Icon name="next" :class="{ waiting: skipPending }" />
+        <Icon name="next" />
+        <!-- M3 circular progress, the waiting goes round the button. -->
+        <svg v-if="skipPending" class="ring" viewBox="0 0 48 48" aria-hidden="true">
+          <circle cx="24" cy="24" r="20" />
+        </svg>
       </button>
       <label class="volume">
         <Icon name="vol" />
@@ -135,7 +142,31 @@ const progress = computed(() => {
 .fab .icon { width: 32px; height: 32px; }
 .icon-button:disabled { opacity: 0.38; cursor: default; }
 .icon-button:disabled::after { display: none; }
-.waiting { animation: pulse var(--app-motion-pulse) var(--md-sys-motion-easing-standard) infinite; }
+/* Waiting for a good beat: the button is lit and a ring goes round it. */
+.skip.busy:disabled {
+  opacity: 1;
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+.ring {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+  animation: spin var(--app-motion-ring) var(--md-sys-motion-easing-linear) infinite;
+}
+.ring circle {
+  fill: none; stroke: var(--md-sys-color-primary); stroke-width: 3; stroke-linecap: round;
+  stroke-dasharray: 30 96;
+  animation: ring-dash var(--app-motion-ring) var(--md-sys-motion-easing-standard) infinite;
+}
+.waiting-chip::before {
+  content: ""; width: 8px; height: 8px; margin-right: 8px; border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-primary);
+  animation: pulse var(--app-motion-pulse) var(--md-sys-motion-easing-standard) infinite;
+}
+@keyframes ring-dash {
+  0% { stroke-dasharray: 2 124; stroke-dashoffset: 0; }
+  50% { stroke-dasharray: 80 46; stroke-dashoffset: -30; }
+  100% { stroke-dasharray: 2 124; stroke-dashoffset: -126; }
+}
 .volume { flex: 1; display: flex; align-items: center; gap: 12px; color: var(--md-sys-color-on-surface-variant); min-width: 0; }
 
 /* M3 slider */

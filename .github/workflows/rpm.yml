@@ -93,6 +93,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cat > notes.md <<'NOTES'
+          **License.** The binaries in this release include Essentia and are
+          distributed under the AGPL-3.0. The source code of the project is
+          LGPL-3.0-or-later; see the README.
+          NOTES
           gh release create "$GITHUB_REF_NAME" dist/*.rpm \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --generate-notes --verify-tag
+            --notes-file notes.md --generate-notes --verify-tag

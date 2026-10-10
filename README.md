@@ -196,4 +196,16 @@ docker run -p 8000:8000 -v radio-data:/data yamusic-radio
 
 ## License
 
-LGPL-3.0-or-later.
+The source code is LGPL-3.0-or-later (`COPYING.LESSER`, which adds to the GPL
+text in `LICENSE`).
+
+**Binaries that include Essentia are distributed under the AGPL-3.0.** The RPM
+and the Docker image bundle [Essentia](https://essentia.upf.edu/) (AGPL-3.0)
+for the key detection, so they are a combined work that you may use and pass
+on only under the terms of the AGPL-3.0, among them the right of every user of
+the radio over the network to get the source: this repository is that source.
+Without Essentia (`pip install .`) the program is LGPL-3.0-or-later and finds
+the key in the simpler way.
+
+The other libraries in the binary are under permissive licenses (Apache-2.0,
+MIT, BSD, PSF-2.0) and MPL-2.0 (certifi); yandex-music is LGPL-3.0.

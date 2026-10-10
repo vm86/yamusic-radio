@@ -3,7 +3,8 @@ Name:           yamusic-radio
 Version:        %{?pkg_version}%{!?pkg_version:0.1.0}
 Release:        %{?pkg_release}%{!?pkg_release:%autorelease}
 Summary:        Endless beat-matched DJ radio from Yandex Music
-License:        LGPL-3.0-or-later
+# The executable bundles Essentia (AGPL-3.0-only), see README.md
+License:        LGPL-3.0-or-later AND AGPL-3.0-only
 
 BuildArch:      x86_64
 BuildRequires:  python3-devel
@@ -25,7 +26,6 @@ into one endless mix (bass swap, filter sweeps, effects) and streams it as
 MP3 over HTTP.
 
 %prep
-# Source добавляет rebuild.py, поэтому %%autosetup при разборе спека не работает
 tar -xzf %{_sourcedir}/%{name}-%{version}.tar.gz
 
 %build

@@ -37,6 +37,8 @@ const player = usePlayer(radio.now);
       <MoodCard
         v-if="radio.moods.value"
         :moods="radio.moods.value"
+        :selected="radio.selectedMoods.value"
+        :pending="radio.pendingMoods.value !== null && !radio.busy.value"
         :disabled="!radio.auth.value?.authorized"
         @change="radio.setMoods"
       />

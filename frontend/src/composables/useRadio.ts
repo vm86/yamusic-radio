@@ -7,8 +7,12 @@ import {
   type Queue,
   type Stats,
 } from "../api";
-import { MOODS, POLL_MS } from "../constants";
+import { MOODS, MOODS_DELAY_MS, POLL_MS } from "../constants";
 import { toast } from "./useToast";
+
+function sameSet(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((item) => b.includes(item));
+}
 
 /** What the radio says, polled, and the things that can be changed in it. */
 export function useRadio() {
@@ -19,6 +23,10 @@ export function useRadio() {
   const moods = ref<MoodsInfo | null>(null);
   const busy = ref(false);
   const refreshing = ref(false);
+  // The moods picked and not yet sent: the radio waits a little in case
+  // another one is picked. Until then the page shows them as chosen.
+  const pendingMoods = ref<string[] | null>(null);
+  let moodTimer: ReturnType<typeof setTimeout> | undefined;
 
   // For the progress: when the queue came, to count the seconds since.
   const fetchedAt = ref(0);
@@ -46,30 +54,57 @@ export function useRadio() {
       takeQueue(q);
       stats.value = s;
       genres.value = g;
-      // Don't undo a choice that is on its way to the radio.
-      if (!busy.value) moods.value = q.moods;
+      // Don't undo a choice that is waiting for, or on its way to, the radio.
+      if (!busy.value && pendingMoods.value === null) moods.value = q.moods;
     } catch {
       if (++failures === 2) toast("Нет связи с радио");
     }
   }
 
-  async function setMoods(list: string[]): Promise<void> {
-    if (busy.value) return;
+  // Picking a mood changes what the chips show at once, and the radio is told
+  // after MOODS_DELAY_MS without another pick.
+  function setMoods(list: string[]): void {
+    pendingMoods.value = list;
+    clearTimeout(moodTimer);
+    moodTimer = setTimeout(() => void applyMoods(), MOODS_DELAY_MS);
+  }
+
+  async function applyMoods(): Promise<void> {
+    clearTimeout(moodTimer);
+    const wanted = pendingMoods.value;
+    if (wanted === null) return;
+    if (busy.value) {
+      // The last change is still on its way: send this one after it.
+      moodTimer = setTimeout(() => void applyMoods(), MOODS_DELAY_MS);
+      return;
+    }
+    if (sameSet(wanted, moods.value?.selected ?? [])) {
+      pendingMoods.value = null; // picked and picked back: nothing to change
+      return;
+    }
     busy.value = true;
     try {
-      moods.value = await api.setMoods(list);
+      moods.value = await api.setMoods(wanted);
       toast(
-        list.length
-          ? `Играем: ${list.map((m) => MOODS[m] ?? m).join(", ")}`
+        wanted.length
+          ? `Играем: ${wanted.map((m) => MOODS[m] ?? m).join(", ")}`
           : "Любое настроение",
       );
+      // A pick made while this was on its way is still waiting.
+      if (pendingMoods.value === wanted) pendingMoods.value = null;
     } catch (error) {
       toast(`Не удалось сменить настроение: ${(error as Error).message}`);
+      pendingMoods.value = null;
       void refresh();
     } finally {
       busy.value = false;
     }
   }
+
+  // What the chips show: the pick that is waiting, else what the radio has.
+  const selectedMoods = computed(
+    () => pendingMoods.value ?? moods.value?.selected ?? [],
+  );
 
   async function setGenres(list: string[]): Promise<void> {
     try {
@@ -121,6 +156,8 @@ export function useRadio() {
 
   function onVisible(): void {
     if (!document.hidden) void refresh();
+    // Leaving the page: don't lose a pick that is still waiting.
+    else void applyMoods();
   }
 
   onMounted(() => {
@@ -132,6 +169,7 @@ export function useRadio() {
   onUnmounted(() => {
     clearInterval(poll);
     clearInterval(clock);
+    clearTimeout(moodTimer);
     document.removeEventListener("visibilitychange", onVisible);
   });
 
@@ -141,6 +179,8 @@ export function useRadio() {
     stats,
     genres,
     moods,
+    selectedMoods,
+    pendingMoods,
     now,
     elapsed,
     busy,

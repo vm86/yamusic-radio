@@ -46,6 +46,8 @@ export interface TransitionData {
   total: number;
   beat_matched: number;
   by_type: Record<string, number>;
+  /** none, drop, echo; "unknown" for blends made before they were counted. */
+  by_effect: Record<string, number>;
   by_key: Record<string, number>;
   by_quality: { good: number; fair: number; poor: number; unknown: number };
 }

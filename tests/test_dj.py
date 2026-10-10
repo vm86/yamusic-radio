@@ -166,6 +166,7 @@ class FakeRadio:
         self.decks = decks
         self.asked: list[dj_mix.TrackAnalysis | None] = []
         self.events: list[tuple[str, str]] = []
+        self.transitions: list[tuple[dj_mix.Transition, dj_mix.Effect]] = []
 
     async def next_deck(self, current: dj_mix.TrackAnalysis | None) -> dj.Deck:
         self.asked.append(current)
@@ -177,9 +178,14 @@ class FakeRadio:
         return False
 
     def transition(
-        self, kind: dj_mix.Transition, current: dj.Deck, following: dj.Deck
+        self,
+        kind: dj_mix.Transition,
+        current: dj.Deck,
+        following: dj.Deck,
+        effect: dj_mix.Effect = dj_mix.Effect.NONE,
     ) -> None:
         self.events.append(("transition", f"{current.title}>{following.title}"))
+        self.transitions.append((kind, effect))
 
     def started(self, deck: dj.Deck) -> None:
         self.events.append(("started", deck.title))
@@ -1373,15 +1379,18 @@ async def test_transitions_are_counted_and_kept(
     second.analysis = keyed
     third.analysis = dataclasses.replace(third.analysis, key=key_of("9A"))
 
-    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+    radio.transition(
+        dj_mix.Transition.BASS_SWAP, first, second, dj_mix.Effect.DROP
+    )
     radio.transition(dj_mix.Transition.FILTER_SWEEP, second, third)
-    radio.transition(dj_mix.Transition.BASS_SWAP, third, first)
+    radio.transition(dj_mix.Transition.CROSSFADE, third, first)
 
     stats = radio.transition_stats()
     assert stats["session"] == {
         "total": 3,
         "beat_matched": 1,
-        "by_type": {"bass swap": 2, "filter sweep": 1},
+        "by_type": {"bass swap": 1, "filter sweep": 1, "crossfade": 1},
+        "by_effect": {"drop": 1, "none": 2},
         "by_key": {"unknown": 2, "neighbour": 1},
         "by_quality": {"good": 1, "fair": 0, "poor": 0, "unknown": 2},
     }
@@ -1422,6 +1431,7 @@ def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
             "total": 0,
             "beat_matched": 0,
             "by_type": {},
+            "by_effect": {},
             "by_key": {},
             "by_quality": {"good": 0, "fair": 0, "poor": 0, "unknown": 0},
         },
@@ -2002,3 +2012,158 @@ async def test_next_deck_keeps_the_tempo_of_the_track_and_says_how_far_it_is(
     assert second.analysis.bpm == 128  # no longer stretched to the first
     assert second.beat_matched
     assert second.speed == pytest.approx(120 / 128, abs=1e-3)
+
+
+def test_applied_blend_says_what_blend_really_does() -> None:
+    long = round(dj_mix.MIN_FILTERED_BLEND_SECONDS * SR) * 2
+    short = round(dj_mix.MIN_FILTERED_BLEND_SECONDS * SR) - 1
+    swap, sweep = dj_mix.Transition.BASS_SWAP, dj_mix.Transition.FILTER_SWEEP
+    crossfade = dj_mix.Applied(dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE)
+
+    # Too short for a filtered blend: a plain crossfade, whatever was asked.
+    assert dj_mix.applied_blend(swap, short, SR * 0.5, 1.0) == crossfade
+    assert dj_mix.applied_blend(sweep, short, 0, 1.0) == crossfade
+    # Long enough: the blend as asked, the effects by the beats.
+    assert dj_mix.applied_blend(swap, long, SR * 0.5, 0.0) == dj_mix.Applied(
+        swap, dj_mix.Effect.NONE
+    )
+    assert dj_mix.applied_blend(swap, long, SR * 0.5, 1.0) == dj_mix.Applied(
+        swap, dj_mix.Effect.DROP
+    )
+    assert dj_mix.applied_blend(sweep, long, 0, 1.0) == dj_mix.Applied(
+        sweep, dj_mix.Effect.ECHO
+    )
+
+
+@pytest.mark.parametrize("seconds", [1.5, 8.0])
+@pytest.mark.parametrize("matched", [True, False])
+@pytest.mark.parametrize("effects", [0.0, 1.0])
+def test_blend_does_what_applied_blend_says(
+    *, seconds: float, matched: bool, effects: float
+) -> None:
+    period = SR * 0.5 if matched else 0
+    outgoing, incoming = tones(60, 2000, seconds), tones(80, 3000, seconds)
+    kind = (
+        dj_mix.Transition.BASS_SWAP
+        if matched
+        else dj_mix.Transition.FILTER_SWEEP
+    )
+    used = dj_mix.applied_blend(kind, len(outgoing), period, effects)
+    rng = np.random.default_rng
+
+    plain = dj_mix.blend(
+        kind, outgoing, incoming, period, effects=0.0, rng=rng(0)
+    )
+    result = dj_mix.blend(
+        kind, outgoing, incoming, period, effects=effects, rng=rng(0)
+    )
+
+    if used.kind is dj_mix.Transition.CROSSFADE:
+        assert (result == dj_mix.crossfade(outgoing, incoming)).all()
+    elif used.effect is dj_mix.Effect.NONE:
+        assert (result == plain).all()
+    else:
+        assert np.abs(result - plain).max() > 0  # dressed up
+
+
+@pytest.mark.asyncio
+async def test_mix_counts_the_blend_as_made_with_its_effects() -> None:
+    first = deck("one", 120, 0.3, matched=False)
+    second = deck("two", 120, 0.17, matched=True)
+    radio = FakeRadio([first, second])
+
+    async def play(effects: float) -> None:
+        radio.decks = [
+            deck("one", 120, 0.3, matched=False),
+            deck("two", 120, 0.17, matched=True),
+        ]
+        await play_until_out_of_tracks_with(radio, effects)
+
+    await play(0.0)
+    await play(1.0)
+
+    # The kind depends on the keys the clicks happen to get; the effects
+    # follow what was asked for.
+    assert [effect for _, effect in radio.transitions] == [
+        dj_mix.Effect.NONE,
+        dj_mix.Effect.DROP,
+    ]
+    assert all(
+        kind in (dj_mix.Transition.BASS_SWAP, dj_mix.Transition.EQ_BLEND)
+        for kind, _ in radio.transitions
+    )
+
+
+async def play_until_out_of_tracks_with(
+    radio: FakeRadio, effects: float
+) -> None:
+    with pytest.raises(RuntimeError, match="out of tracks"):
+        async for _ in dj.mix(radio, effects):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_mix_counts_a_failed_blend_as_a_crossfade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise ValueError("no blend today")
+
+    monkeypatch.setattr(dj_mix, "blend", broken)
+    radio = FakeRadio(
+        [
+            deck("one", 120, 0.3, matched=False),
+            deck("two", 120, 0.17, matched=True),
+        ]
+    )
+
+    await play_until_out_of_tracks_with(radio, 1.0)
+
+    assert radio.transitions == [
+        (dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE)
+    ]
+
+
+def test_cache_keeps_the_effects_and_calls_older_rows_unknown(
+    tmp_path: Path,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    from yandex_music_radio_dj.cache import TrackCache  # noqa: PLC0415
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE transitions (
+            at REAL NOT NULL, kind TEXT NOT NULL, beat_matched INTEGER NOT NULL,
+            key_relation TEXT NOT NULL, from_track TEXT NOT NULL,
+            to_track TEXT NOT NULL, from_key TEXT, to_key TEXT);
+        INSERT INTO transitions VALUES
+            (1, 'bass swap', 1, 'same', 'a', 'b', '8A', '8A');
+        """
+    )
+    old.commit()
+    old.close()
+
+    cache = TrackCache(path)  # adds the column
+    cache.add_transition(
+        "crossfade",
+        beat_matched=False,
+        key_relation="unknown",
+        from_track="b",
+        to_track="c",
+        effect="echo",
+    )
+    cache.add_transition(
+        "bass swap",
+        beat_matched=True,
+        key_relation="same",
+        from_track="c",
+        to_track="d",
+    )
+
+    stats = cache.transition_stats()
+    cache.close()
+    assert stats["by_effect"] == {"unknown": 1, "echo": 1, "none": 1}
+    assert stats["by_type"] == {"bass swap": 2, "crossfade": 1}

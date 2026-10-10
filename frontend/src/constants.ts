@@ -12,6 +12,12 @@ export const TRANSITIONS: Record<string, string> = {
   crossfade: "Кроссфейд",
 };
 
+export const EFFECTS: Record<string, string> = {
+  none: "Без эффектов",
+  drop: "Райзер и удар",
+  echo: "Эхо-аут",
+};
+
 export const QUALITY: Record<string, string> = {
   good: "Удачные",
   fair: "Допустимые",

@@ -1146,6 +1146,38 @@ def add_drop(
     return result
 
 
+class Effect(StrEnum):
+    """What a blend is dressed up with (see blend)."""
+
+    NONE = "none"
+    DROP = "drop"  # a riser builds up to the drop and a boom lands on it
+    ECHO = "echo"  # the outgoing track is echoed out
+
+
+@dataclass(frozen=True, slots=True)
+class Applied:
+    """What a blend really is, which can differ from what was asked for."""
+
+    kind: Transition
+    effect: Effect
+
+
+def applied_blend(
+    kind: Transition, frames: int, beat_period: float, effects: float
+) -> Applied:
+    """Say what blend() makes of the pieces.
+
+    A piece too short for a filtered blend is just crossfaded, with no
+    effects; otherwise the effects follow `effects` and the beats (a drop
+    with a shared grid, else an echo).
+    """
+    if frames < MIN_FILTERED_BLEND_SECONDS * SAMPLE_RATE:
+        return Applied(Transition.CROSSFADE, Effect.NONE)
+    if effects <= 0:
+        return Applied(kind, Effect.NONE)
+    return Applied(kind, Effect.DROP if beat_period else Effect.ECHO)
+
+
 def blend(
     kind: Transition,
     outgoing: Pcm,
@@ -1165,12 +1197,12 @@ def blend(
     tempo glides over the blend (beat_period is then their mean distance).
     """
     frames = len(outgoing)
-    if frames < MIN_FILTERED_BLEND_SECONDS * SAMPLE_RATE:
+    used = applied_blend(kind, frames, beat_period, effects)
+    if used.kind is not kind:
         return crossfade(outgoing, incoming)
     rng = rng or np.random.default_rng()
-    dressed = effects > 0
 
-    if dressed and not beat_period:
+    if used.effect is Effect.ECHO:
         outgoing = echo_out(outgoing, round(frames * ECHO_CUT_AT), effects)
 
     swap = swap_point(frames, beat_period, beat_grid) if beat_period else None
@@ -1183,7 +1215,7 @@ def blend(
     else:
         blended = crossfade(outgoing, incoming)
 
-    if dressed and beat_period:
+    if used.effect is Effect.DROP:
         period = beat_period
         if swap is not None and kind in (
             Transition.BASS_SWAP,

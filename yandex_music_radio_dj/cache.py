@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS transitions (
     from_track TEXT NOT NULL,
     to_track TEXT NOT NULL,
     from_key TEXT,
-    to_key TEXT
+    to_key TEXT,
+    effect TEXT
 );
 CREATE INDEX IF NOT EXISTS tracks_played ON tracks (played_at);
 CREATE INDEX IF NOT EXISTS tracks_used ON tracks (used_at);
@@ -61,10 +62,11 @@ class TrackCache:
         transition_columns = {
             row[1] for row in self._db.execute("PRAGMA table_info(transitions)")
         }
-        for column in ("from_key", "to_key"):
+        for column in ("from_key", "to_key", "effect"):
             if column not in transition_columns:
-                # Made before the keys of the transitions were kept: those
-                # rows have no key (NULL), unlike a key that was not found.
+                # Made before the keys (or the effects) of the transitions
+                # were kept: those rows have none (NULL), unlike a key that
+                # was not found, or a blend without effects.
                 self._db.execute(
                     f"ALTER TABLE transitions ADD COLUMN {column} TEXT"
                 )
@@ -156,6 +158,7 @@ class TrackCache:
         to_track: str,
         from_key: str = "",
         to_key: str = "",
+        effect: str = "none",
     ) -> None:
         """Remember how one track was blended into the next.
 
@@ -163,8 +166,8 @@ class TrackCache:
         """
         self._db.execute(
             "INSERT INTO transitions (at, kind, beat_matched, key_relation, "
-            "from_track, to_track, from_key, to_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "from_track, to_track, from_key, to_key, effect) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 time.time(),
                 kind,
@@ -174,6 +177,7 @@ class TrackCache:
                 to_track,
                 from_key,
                 to_key,
+                effect,
             ),
         )
         self._db.commit()
@@ -191,9 +195,12 @@ class TrackCache:
         """Count the transitions ever made by kind and by key change."""
 
         def count(column: str) -> dict[str, int]:
+            # What was made before the column was kept is "unknown".
             rows = self._db.execute(
-                f"SELECT {column}, COUNT(*) FROM transitions "  # noqa: S608
-                f"GROUP BY {column} ORDER BY COUNT(*) DESC"
+                f"SELECT COALESCE({column}, 'unknown'), COUNT(*) "  # noqa: S608
+                f"FROM transitions "
+                f"GROUP BY COALESCE({column}, 'unknown') "
+                f"ORDER BY COUNT(*) DESC"
             ).fetchall()
             return {str(name): int(number) for name, number in rows}
 
@@ -205,6 +212,7 @@ class TrackCache:
             "beat_matched": int(matched),
             "by_type": count("kind"),
             "by_key": count("key_relation"),
+            "by_effect": count("effect"),
         }
 
     def known_genres(self) -> list[tuple[str, int]]:

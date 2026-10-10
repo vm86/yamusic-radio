@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Stats } from "../api";
-import { QUALITY, TRANSITIONS } from "../constants";
+import { EFFECTS, QUALITY, TRANSITIONS } from "../constants";
 
 const props = defineProps<{ stats: Stats }>();
 
@@ -33,6 +33,17 @@ const rhythm = computed(() =>
     data.value.total,
   ),
 );
+// Blends made before the effects were counted are not told apart: say so
+// instead of showing them as a row.
+const effectCounts = computed(() => {
+  const { unknown, ...known } = data.value.by_effect;
+  return { known, unknown: unknown ?? 0 };
+});
+const effects = computed(() => {
+  const { known } = effectCounts.value;
+  const total = Object.values(known).reduce((sum, count) => sum + count, 0);
+  return rows(known, EFFECTS, total);
+});
 const quality = computed(() => {
   const { good, fair, poor } = data.value.by_quality;
   return rows({ good, fair, poor }, QUALITY, good + fair + poor);
@@ -48,6 +59,7 @@ const unknown = computed(() => data.value.by_quality.unknown);
     </div>
     <template v-for="group in [
       { title: 'Тип', rows: types },
+      { title: 'Эффекты', rows: effects },
       { title: 'По ритму', rows: rhythm },
       { title: 'Удачность по тональностям', rows: quality },
     ]" :key="group.title">
@@ -58,6 +70,9 @@ const unknown = computed(() => data.value.by_quality.unknown);
         <div class="meter"><i :style="{ width: `${row.share}%` }" /></div>
       </div>
     </template>
+    <p v-if="effectCounts.unknown" class="hint">
+      Ещё {{ effectCounts.unknown }} переходов — до учёта эффектов, в «Эффектах» не учтены.
+    </p>
     <p v-if="unknown" class="hint">Ещё {{ unknown }} — тональность неизвестна, не учтены.</p>
   </section>
 </template>

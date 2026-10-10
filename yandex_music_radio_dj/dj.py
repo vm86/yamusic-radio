@@ -313,6 +313,7 @@ class Radio:
         self._generation = 0
         # What the transitions of this run were like.
         self._transitions: Counter[str] = Counter()
+        self._effects: Counter[str] = Counter()
         self._transition_keys: Counter[str] = Counter()
         self._matched_transitions = 0
         self._key_pairs: Counter[tuple[str, str]] = Counter()
@@ -863,13 +864,18 @@ class Radio:
             return deck
 
     def transition(
-        self, kind: dj_mix.Transition, current: Deck, following: Deck
+        self,
+        kind: dj_mix.Transition,
+        current: Deck,
+        following: Deck,
+        effect: dj_mix.Effect = dj_mix.Effect.NONE,
     ) -> None:
         """Count a blend of the current deck into the following one."""
         relation = dj_mix.key_relation(
             current.analysis.key, following.analysis.key
         )
         self._transitions[kind.value] += 1
+        self._effects[effect.value] += 1
         self._transition_keys[relation] += 1
         self._key_pairs[
             current.analysis.camelot, following.analysis.camelot
@@ -884,6 +890,7 @@ class Radio:
                 to_track=following.track.track_id if following.track else "",
                 from_key=current.analysis.camelot,
                 to_key=following.analysis.camelot,
+                effect=effect.value,
             )
 
     def transition_stats(self) -> dict[str, object]:
@@ -892,6 +899,7 @@ class Radio:
             "total": self._transitions.total(),
             "beat_matched": self._matched_transitions,
             "by_type": dict(self._transitions.most_common()),
+            "by_effect": dict(self._effects.most_common()),
             "by_key": dict(self._transition_keys.most_common()),
         }
         all_time = (
@@ -1095,8 +1103,9 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
                 beat_matched=following.beat_matched,
                 blend_seconds=len(outgoing) / SAMPLE_RATE,
             )
-            log.info("Transition: %s", kind.value)
-            radio.transition(kind, current, following)
+            used = dj_mix.applied_blend(
+                kind, len(outgoing), beat_period, effects
+            )
             # The filtering takes a while, don't stall the event loop with it.
             try:
                 blended = await asyncio.to_thread(
@@ -1114,6 +1123,14 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
                 # A broken blend must not end the stream: fade instead.
                 log.exception("Blend failed (%s), crossfading", kind.value)
                 blended = dj_mix.crossfade(outgoing, incoming)
+                used = dj_mix.Applied(
+                    dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE
+                )
+            log.info(
+                "Transition: %s, effect: %s", used.kind.value, used.effect.value
+            )
+            # Count what was really made, not what was meant.
+            radio.transition(used.kind, current, following, used.effect)
             radio.started(following)
             half = len(blended) // 2
             for piece in _pieces(blended[:half], current.title):

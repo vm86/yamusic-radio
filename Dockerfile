@@ -14,7 +14,7 @@ RUN dnf install -y --setopt=install_weak_deps=False python3 python3-pip \
     && dnf clean all
 
 WORKDIR /src
-COPY pyproject.toml LICENSE COPYING.LESSER MANIFEST.in ./
+COPY pyproject.toml README.md LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yamusic_radio ./yamusic_radio
 # Essentia finds the keys; it has wheels for x86_64 only, elsewhere the
 # program falls back to a simpler (and worse) key detection.

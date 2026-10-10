@@ -9,6 +9,7 @@ description = "Endless beat-matched DJ radio from Yandex Music stations"
 authors = [{ name = "Roman Nebaluev" }]
 license = "LGPL-3.0-or-later"
 license-files = ["LICENSE", "COPYING.LESSER"]
+readme = "README.md"
 keywords = ["yandex", "music", "radio", "dj", "mix", "beatmatching"]
 classifiers = [
     "Development Status :: 4 - Beta",

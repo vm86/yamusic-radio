@@ -57,6 +57,7 @@ export const en: Messages = {
 
   "genres.title": "Genres",
   "genres.any": "Any",
+  "genres.tabPlay": "Play",
   "genres.pending": "The choice has changed: it comes into force after “Rebuild the queue”.",
   "genres.hint":
     "The queue is built from the genres picked until the choice changes. Applied by the “Rebuild the queue” button. Genres are taken from the tracks already played.",

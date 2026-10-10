@@ -23,6 +23,8 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: "jsdom",
       include: ["src/**/*.test.ts"],
+      // The tests read the Russian texts: the language of jsdom is English.
+      setupFiles: ["src/test-setup.ts"],
     },
   };
 });

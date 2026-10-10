@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
-import { APP_TITLE } from "../constants";
+import { t } from "../i18n";
 import Icon from "./Icon.vue";
+import LocaleButton from "./LocaleButton.vue";
 import ThemeButton from "./ThemeButton.vue";
 
 defineProps<{ playing: boolean }>();
@@ -18,10 +19,11 @@ onBeforeUnmount(() => window.removeEventListener("scroll", onScroll));
 <template>
   <header class="app-bar" :class="{ scrolled }">
     <Icon name="vinyl" class="logo" />
-    <h1>{{ APP_TITLE }}</h1>
+    <h1>{{ t("app.title") }}</h1>
     <span class="live" :class="{ on: playing }" role="status">
-      {{ playing ? "В эфире" : "Пауза" }}
+      {{ playing ? t("bar.live") : t("bar.pause") }}
     </span>
+    <LocaleButton />
     <ThemeButton />
   </header>
 </template>

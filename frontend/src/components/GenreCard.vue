@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { GenresInfo } from "../api";
+import { t } from "../i18n";
 import ChipGroup from "./ChipGroup.vue";
 
 const props = defineProps<{ genres: GenresInfo }>();
@@ -17,25 +18,25 @@ const shown = computed(() => props.genres.available.length > 0 || props.genres.s
 
 <template>
   <section v-if="shown" class="card">
-    <div class="card-head"><h2>Жанры</h2></div>
+    <div class="card-head"><h2>{{ t("genres.title") }}</h2></div>
     <p class="hint" :class="{ pending }">
       {{
         pending
-          ? "Выбор изменён: он вступит в силу после кнопки «Обновить очередь»."
-          : "Очередь строится из выбранных жанров, пока выбор не изменится. Применяется кнопкой «Обновить очередь». Жанры берутся из уже проигранных треков."
+          ? t("genres.pending")
+          : t("genres.hint")
       }}
     </p>
     <ChipGroup
-      label="Жанры"
-      any-label="Любые"
+      :label="t('genres.title')"
+      :any-label="t('genres.any')"
       :options="genres.available"
       :selected="genres.selected"
       @change="$emit('change', $event)"
     />
-    <h3>Не играть</h3>
+    <h3>{{ t("genres.blocked") }}</h3>
     <ChipGroup
-      label="Не играть"
-      any-label="Нет"
+      :label="t('genres.blocked')"
+      :any-label="t('genres.blockedNone')"
       :options="genres.available"
       :selected="genres.blocked"
       @change="$emit('block', $event)"

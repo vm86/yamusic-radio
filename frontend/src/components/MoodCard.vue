@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { MoodsInfo } from "../api";
-import { MOODS } from "../constants";
+import { moodNames, t } from "../i18n";
 import ChipGroup from "./ChipGroup.vue";
 
 defineProps<{
@@ -16,20 +16,20 @@ defineEmits<{ change: [moods: string[]] }>();
 
 <template>
   <section class="card">
-    <div class="card-head"><h2>Настроение микса</h2></div>
+    <div class="card-head"><h2>{{ t("moods.title") }}</h2></div>
     <p class="hint" :class="{ pending }">
       {{
         pending
-          ? "Выбор принят: ещё секунду подождём, вдруг выберете ещё настроение."
-          : "Микс будет только между выбранными настроениями. Выбор меняет настройку станции в вашем аккаунте Яндекс Музыки."
+          ? t("moods.pending")
+          : t("moods.hint")
       }}
     </p>
     <ChipGroup
-      label="Настроение"
-      any-label="Любое"
+      :label="t('moods.label')"
+      :any-label="t('moods.any')"
       :options="moods.available"
       :selected="selected"
-      :names="MOODS"
+      :names="moodNames()"
       :disabled="disabled"
       @change="$emit('change', $event)"
     />

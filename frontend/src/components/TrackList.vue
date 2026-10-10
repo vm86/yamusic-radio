@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { TrackInfo } from "../api";
-import { MOODS } from "../constants";
 import { clock } from "../format";
+import { moodNames, t } from "../i18n";
 import CoverThumb from "./CoverThumb.vue";
 import KeyTag from "./KeyTag.vue";
 
@@ -17,7 +17,7 @@ function badge(kind: "past" | "queue", index: number, count: number): string {
 }
 
 function sub(track: TrackInfo): string {
-  return [track.artists.join(", "), MOODS[track.mood]].filter(Boolean).join(" · ") || "—";
+  return [track.artists.join(", "), moodNames()[track.mood]].filter(Boolean).join(" · ") || "—";
 }
 </script>
 
@@ -36,8 +36,8 @@ function sub(track: TrackInfo): string {
         <div class="s">
           <span class="pos">{{ badge(kind, index, tracks.length) }}</span>
           <!-- The ring round the cover says it to the eye, this to a screen reader. -->
-          <span v-if="kind === 'past'" class="sr">, уже играл</span>
-          <span v-else-if="!track.decided" class="sr">, прогноз</span>
+          <span v-if="kind === 'past'" class="sr">{{ t("track.playedBefore") }}</span>
+          <span v-else-if="!track.decided" class="sr">{{ t("track.forecast") }}</span>
           · {{ sub(track) }}
         </div>
       </div>

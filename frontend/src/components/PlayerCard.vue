@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { NowTrack } from "../api";
-import { MOODS } from "../constants";
 import { clock } from "../format";
+import { moodNames, t } from "../i18n";
 import Icon from "./Icon.vue";
 import KeyTag from "./KeyTag.vue";
 import VinylRecord from "./VinylRecord.vue";
@@ -19,10 +19,10 @@ const props = defineProps<{
 const volume = defineModel<number>("volume", { required: true });
 defineEmits<{ toggle: []; skip: [] }>();
 
-const title = computed(() => props.now?.title ?? "Ничего не играет");
+const title = computed(() => props.now?.title ?? t("player.nothing"));
 const artists = computed(() => {
   if (props.now) return props.now.artists.join(", ") || "—";
-  return props.playing ? "Готовим первый трек…" : "Нажмите «Слушать»";
+  return props.playing ? t("player.preparing") : t("player.press");
 });
 const progress = computed(() => {
   const total = props.now?.duration_seconds ?? 0;
@@ -41,21 +41,21 @@ const progress = computed(() => {
       <div v-if="now" class="facts">
         <span v-if="now.bpm" class="assist">{{ Math.round(now.bpm) }} BPM</span>
         <KeyTag v-if="now.camelot" :camelot="now.camelot" :key-name="now.key" kind="assist" />
-        <span v-if="MOODS[now.mood]" class="assist">{{ MOODS[now.mood] }}</span>
-        <span class="assist">{{ Math.round(now.loudness_db) }} дБ</span>
+        <span v-if="moodNames()[now.mood]" class="assist">{{ moodNames()[now.mood] }}</span>
+        <span class="assist">{{ t("player.db", { value: Math.round(now.loudness_db) }) }}</span>
         <!-- The next track was asked for: the blend waits for a good beat. -->
-        <span v-if="skipPending" class="assist waiting-chip">Ждём подходящий бит…</span>
+        <span v-if="skipPending" class="assist waiting-chip">{{ t("player.waiting") }}</span>
       </div>
     </div>
     <div class="progress">
       <div
         class="bar"
         role="progressbar"
-        aria-label="Позиция в треке"
+        :aria-label="t('player.position')"
         aria-valuemin="0"
         :aria-valuenow="Math.round(elapsed)"
         :aria-valuemax="Math.round(now?.duration_seconds ?? 0)"
-        :aria-valuetext="now ? `${clock(elapsed)} из ${clock(now.duration_seconds)}` : undefined"
+        :aria-valuetext="now ? t('player.positionText', { elapsed: clock(elapsed), total: clock(now.duration_seconds) }) : undefined"
       >
         <i :style="{ width: `${progress}%` }" />
       </div>
@@ -74,8 +74,8 @@ const progress = computed(() => {
         type="button"
         :disabled="!canSkip || skipPending"
         :aria-busy="skipPending"
-        :title="skipPending ? 'Ждём подходящий бит…' : 'Следующий трек'"
-        :aria-label="skipPending ? 'Ждём подходящий бит' : 'Следующий трек'"
+        :title="skipPending ? t('player.waiting') : t('player.next')"
+        :aria-label="skipPending ? t('player.waitingLabel') : t('player.next')"
         @click="$emit('skip')"
       >
         <Icon name="next" />
@@ -91,7 +91,7 @@ const progress = computed(() => {
           type="range"
           min="0"
           max="100"
-          aria-label="Громкость"
+          :aria-label="t('player.volume')"
           :style="{ '--fill': `${volume}%` }"
         />
       </label>

@@ -7,7 +7,8 @@ import {
   type Queue,
   type Stats,
 } from "../api";
-import { MOODS, MOODS_DELAY_MS, POLL_MS } from "../constants";
+import { MOODS_DELAY_MS, POLL_MS } from "../constants";
+import { moodNames, t } from "../i18n";
 import { toast } from "./useToast";
 
 function sameSet(a: string[], b: string[]): boolean {
@@ -57,7 +58,7 @@ export function useRadio() {
       // Don't undo a choice that is waiting for, or on its way to, the radio.
       if (!busy.value && pendingMoods.value === null) moods.value = q.moods;
     } catch {
-      if (++failures === 2) toast("Нет связи с радио");
+      if (++failures === 2) toast(t("toast.offline"));
     }
   }
 
@@ -87,13 +88,13 @@ export function useRadio() {
       moods.value = await api.setMoods(wanted);
       toast(
         wanted.length
-          ? `Играем: ${wanted.map((m) => MOODS[m] ?? m).join(", ")}`
-          : "Любое настроение",
+          ? t("toast.playing", { moods: wanted.map((m) => moodNames()[m] ?? m).join(", ") })
+          : t("toast.anyMood"),
       );
       // A pick made while this was on its way is still waiting.
       if (pendingMoods.value === wanted) pendingMoods.value = null;
     } catch (error) {
-      toast(`Не удалось сменить настроение: ${(error as Error).message}`);
+      toast(t("toast.moodFailed", { reason: (error as Error).message }));
       pendingMoods.value = null;
       void refresh();
     } finally {
@@ -110,7 +111,7 @@ export function useRadio() {
     try {
       genres.value = await api.setGenres(list);
     } catch (error) {
-      toast(`Не удалось выбрать жанры: ${(error as Error).message}`);
+      toast(t("toast.genresFailed", { reason: (error as Error).message }));
     }
   }
 
@@ -118,7 +119,7 @@ export function useRadio() {
     try {
       genres.value = await api.setBlockedGenres(list);
     } catch (error) {
-      toast(`Не удалось запретить жанры: ${(error as Error).message}`);
+      toast(t("toast.blockedFailed", { reason: (error as Error).message }));
     }
   }
 
@@ -130,15 +131,15 @@ export function useRadio() {
       // beat. The lists stay as they are, or they would flicker.
       const { skip_pending } = await api.nextTrack();
       if (queue.value) queue.value = { ...queue.value, skip_pending };
-      toast("Следующий трек: переход начнётся на ближайшем сильном бите");
+      toast(t("toast.skipAsked"));
     } catch (error) {
       const reason = (error as Error).message;
       toast(
         reason.includes("under way")
-          ? "Сейчас уже идёт переход, подождите"
+          ? t("toast.skipBusy")
           : reason.includes("nothing is playing")
-            ? "Пока ничего не играет"
-            : `Не удалось перейти к следующему треку: ${reason}`,
+            ? t("toast.skipIdle")
+            : t("toast.skipFailed", { reason }),
       );
     }
   }
@@ -148,9 +149,9 @@ export function useRadio() {
     try {
       takeQueue(await api.refreshQueue());
       genres.value = await api.genres();
-      toast("Очередь пересобрана из загруженных треков");
+      toast(t("toast.refreshed"));
     } catch (error) {
-      toast(`Не удалось обновить очередь: ${(error as Error).message}`);
+      toast(t("toast.refreshFailed", { reason: (error as Error).message }));
     } finally {
       refreshing.value = false;
     }

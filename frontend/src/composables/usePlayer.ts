@@ -1,6 +1,6 @@
 import { computed, ref, watch, type Ref } from "vue";
 import type { NowTrack } from "../api";
-import { APP_TITLE } from "../constants";
+import { t } from "../i18n";
 import { toast } from "./useToast";
 
 const VOLUME_KEY = "volume";
@@ -28,7 +28,7 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   audio.addEventListener("playing", sync);
   audio.addEventListener("pause", sync);
   audio.addEventListener("error", () => {
-    if (audio.getAttribute("src")) toast("Поток недоступен");
+    if (audio.getAttribute("src")) toast(t("toast.streamDown"));
     sync();
   });
 
@@ -55,7 +55,7 @@ export function usePlayer(now: Ref<NowTrack | null>) {
       try {
         await audio.play();
       } catch (error) {
-        toast(`Не удалось начать воспроизведение: ${(error as Error).message}`);
+        toast(t("toast.playFailed", { reason: (error as Error).message }));
       }
     }
     sync();
@@ -64,13 +64,13 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   watch(
     now,
     (track) => {
-      document.title = track ? `${track.title} — ${APP_TITLE}` : APP_TITLE;
+      document.title = track ? `${track.title} — ${t("app.title")}` : t("app.title");
       if ("mediaSession" in navigator) {
         navigator.mediaSession.metadata = track
           ? new MediaMetadata({
               title: track.title,
               artist: track.artists.join(", "),
-              album: APP_TITLE,
+              album: t("app.title"),
             })
           : null;
       }
@@ -86,6 +86,6 @@ export function usePlayer(now: Ref<NowTrack | null>) {
     playing,
     volume,
     toggle,
-    label: computed(() => (playing.value ? "Остановить" : "Слушать")),
+    label: computed(() => (playing.value ? t("player.stop") : t("player.play"))),
   };
 }

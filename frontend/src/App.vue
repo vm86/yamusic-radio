@@ -10,6 +10,7 @@ import StatsCard from "./components/StatsCard.vue";
 import TrackList from "./components/TrackList.vue";
 import { usePlayer } from "./composables/usePlayer";
 import { useRadio } from "./composables/useRadio";
+import { t } from "./i18n";
 
 const radio = useRadio();
 const player = usePlayer(radio.now);
@@ -48,18 +49,18 @@ const player = usePlayer(radio.now);
 
     <div class="column">
       <section class="card filled">
-        <div class="card-head"><h2>Что играло</h2></div>
-        <TrackList :tracks="radio.queue.value?.previous ?? []" empty="Пока ничего" kind="past" />
+        <div class="card-head"><h2>{{ t("queue.played") }}</h2></div>
+        <TrackList :tracks="radio.queue.value?.previous ?? []" :empty="t('queue.nothingYet')" kind="past" />
       </section>
       <section class="card">
         <div class="card-head">
-          <h2>Дальше</h2>
+          <h2>{{ t("queue.next") }}</h2>
           <button class="btn tonal" type="button" :disabled="radio.refreshing.value" @click="radio.refreshQueue">
-            Обновить очередь
+            {{ t("queue.refresh") }}
           </button>
         </div>
-        <p class="hint">пунктиром — прогноз, он может поменяться</p>
-        <TrackList :tracks="radio.queue.value?.next ?? []" empty="Подбираем следующие треки…" kind="queue" />
+        <p class="hint">{{ t("queue.forecastHint") }}</p>
+        <TrackList :tracks="radio.queue.value?.next ?? []" :empty="t('queue.loading')" kind="queue" />
       </section>
     </div>
   </main>

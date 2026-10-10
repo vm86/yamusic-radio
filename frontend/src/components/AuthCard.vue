@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { AuthInfo } from "../api";
+import { t } from "../i18n";
 
 const props = defineProps<{ auth: AuthInfo }>();
 const ready = computed(() => Boolean(props.auth.url && props.auth.code));
@@ -8,17 +9,17 @@ const ready = computed(() => Boolean(props.auth.url && props.auth.code));
 
 <template>
   <section class="card auth">
-    <h2>Нужна авторизация в Яндексе</h2>
+    <h2>{{ t("auth.title") }}</h2>
     <p>
       {{
         ready
-          ? "Откройте страницу входа Яндекса и введите этот код. Радио запустится само."
-          : "Ждём код от Яндекса…"
+          ? t("auth.open")
+          : t("auth.waiting")
       }}
     </p>
     <div v-if="ready" class="code">{{ auth.code }}</div>
     <a v-if="ready" class="btn" :href="auth.url ?? undefined" target="_blank" rel="noopener">
-      Открыть страницу входа
+      {{ t("auth.link") }}
     </a>
   </section>
 </template>

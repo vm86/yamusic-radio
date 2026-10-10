@@ -33,7 +33,6 @@ const src = computed(() => (failed.value ? "" : coverUrl(props.cover, 200)));
 <style scoped>
 .vinyl {
   position: relative; width: 100%; aspect-ratio: 1; border-radius: var(--md-sys-shape-corner-full);
-  box-shadow: 0 2px 8px 2px var(--md-elevation-shadow);
 }
 /* The light on the disc does not turn with it */
 .vinyl::after {

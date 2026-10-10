@@ -34,6 +34,7 @@ from asyncio import (
 )
 from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
+from math import log10
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -84,6 +85,8 @@ REPLENISH_RETRY_SECONDS = 120
 MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
 MAX_LISTED = 15
+# The blends kept to look at (see Radio.recent_blends).
+MAX_RECENT_BLENDS = 10
 # A beat grid of a blend needs at least this many points to give a period.
 MIN_BEATS_IN_GRID = 2
 # The page the radio shows at /.
@@ -120,6 +123,44 @@ def cover_template(track: ExtendTrack | None) -> str:
     if not isinstance(uri, str) or not uri:
         return ""
     return uri if uri.startswith("http") else f"https://{uri}"
+
+
+@dataclass(frozen=True, slots=True)
+class BlendReport:
+    """How one blend was made, to look at when it did not sound right."""
+
+    from_title: str
+    to_title: str
+    kind: str
+    effect: str
+    beat_matched: bool
+    from_bpm: float
+    to_bpm: float
+    # How far the tempo glided, as a fraction (0.05: 5% faster); 0 if not.
+    glide: float
+    seconds: float
+    loudness_gap_db: float
+    key_relation: str
+    # How far above the ceiling the blend peaked before it was limited.
+    over_db: float
+    at: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "from": self.from_title,
+            "to": self.to_title,
+            "kind": self.kind,
+            "effect": self.effect,
+            "beat_matched": self.beat_matched,
+            "from_bpm": self.from_bpm,
+            "to_bpm": self.to_bpm,
+            "glide": self.glide,
+            "seconds": self.seconds,
+            "loudness_gap_db": self.loudness_gap_db,
+            "key_relation": self.key_relation,
+            "over_db": self.over_db,
+            "at": self.at,
+        }
 
 
 class SkipRefusedError(Exception):
@@ -324,6 +365,7 @@ class Radio:
         # What the transitions of this run were like.
         self._transitions: Counter[str] = Counter()
         self._effects: Counter[str] = Counter()
+        self._recent: deque[BlendReport] = deque(maxlen=MAX_RECENT_BLENDS)
         self._transition_keys: Counter[str] = Counter()
         self._matched_transitions = 0
         self._key_pairs: Counter[tuple[str, str]] = Counter()
@@ -901,8 +943,11 @@ class Radio:
         current: Deck,
         following: Deck,
         effect: dj_mix.Effect = dj_mix.Effect.NONE,
+        report: BlendReport | None = None,
     ) -> None:
         """Count a blend of the current deck into the following one."""
+        if report is not None:
+            self._recent.append(report)
         # Natural blends answer a request for the next track as well.
         self._skip = False
         self._blending = True
@@ -927,6 +972,10 @@ class Radio:
                 to_key=following.analysis.camelot,
                 effect=effect.value,
             )
+
+    def recent_blends(self) -> list[dict[str, object]]:
+        """Describe the last blends, the newest last."""
+        return [report.to_dict() for report in self._recent]
 
     def transition_stats(self) -> dict[str, object]:
         """Describe the transitions of this run and of all runs."""
@@ -1193,9 +1242,41 @@ async def _transition(
         log.exception("Blend failed (%s), crossfading", kind.value)
         blended = dj_mix.crossfade(outgoing, incoming)
         used = dj_mix.Applied(dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE)
-    log.info("Transition: %s, effect: %s", used.kind.value, used.effect.value)
+    # Two loud tracks and the effects add up to more than fits in the encoder.
+    peak = float(np.abs(blended).max())
+    over_db = max(0.0, 20 * log10(peak / dj_mix.LIMIT_CEILING)) if peak else 0.0
+    blended = dj_mix.limit(blended)
+    report = BlendReport(
+        from_title=current.title,
+        to_title=following.title,
+        kind=used.kind.value,
+        effect=used.effect.value,
+        beat_matched=following.beat_matched,
+        from_bpm=round(current.analysis.bpm, 1),
+        to_bpm=round(following.analysis.bpm, 1),
+        glide=round(plan.speed - 1, 3) if beat_grid is not None else 0.0,
+        seconds=round(len(blended) / SAMPLE_RATE, 1),
+        loudness_gap_db=round(
+            abs(current.analysis.loudness_db - following.analysis.loudness_db),
+            1,
+        ),
+        key_relation=dj_mix.key_relation(
+            current.analysis.key, following.analysis.key
+        ),
+        over_db=round(over_db, 1),
+        at=time.time(),
+    )
+    log.info(
+        "Transition: %s, effect %s, %.1f s, glide %+.1f%%, over the ceiling "
+        "by %.1f dB",
+        used.kind.value,
+        used.effect.value,
+        report.seconds,
+        report.glide * 100,
+        report.over_db,
+    )
     # Count what was really made, not what was meant.
-    radio.transition(used.kind, current, following, used.effect)
+    radio.transition(used.kind, current, following, used.effect, report)
     radio.started(following)
     half = len(blended) // 2
     for piece in _pieces(blended[:half], current.title):
@@ -1386,7 +1467,11 @@ def _add_stats_api(app: web.Application, radio: Radio) -> None:
     async def key_pairs(_: web.Request) -> web.Response:
         return web.json_response(radio.key_pair_stats())
 
+    async def blends(_: web.Request) -> web.Response:
+        return web.json_response(radio.recent_blends())
+
     app.router.add_get("/api/stats", stats)
+    app.router.add_get("/api/transitions", blends)
     app.router.add_get("/api/stats/keys", key_pairs)
 
 

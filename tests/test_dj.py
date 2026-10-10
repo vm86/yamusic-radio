@@ -169,6 +169,7 @@ class FakeRadio:
         self.asked: list[dj_mix.TrackAnalysis | None] = []
         self.events: list[tuple[str, str]] = []
         self.transitions: list[tuple[dj_mix.Transition, dj_mix.Effect]] = []
+        self.reports: list[dj.BlendReport] = []
 
     async def next_deck(self, current: dj_mix.TrackAnalysis | None) -> dj.Deck:
         self.asked.append(current)
@@ -189,9 +190,12 @@ class FakeRadio:
         current: dj.Deck,
         following: dj.Deck,
         effect: dj_mix.Effect = dj_mix.Effect.NONE,
+        report: dj.BlendReport | None = None,
     ) -> None:
         self.events.append(("transition", f"{current.title}>{following.title}"))
         self.transitions.append((kind, effect))
+        if report is not None:
+            self.reports.append(report)
 
     def started(self, deck: dj.Deck) -> None:
         self.events.append(("started", deck.title))
@@ -2357,3 +2361,307 @@ async def test_mix_goes_on_if_there_is_no_room_for_an_early_blend() -> None:
 
     assert ("skip", "") not in radio.events
     assert ("transition", "one>two") in radio.events  # the natural blend
+
+
+def loud_master(bpm: float, seconds: float, seed: int) -> np.ndarray:
+    """Make a kick and a pad mastered to peak at 0.98, like a loud track."""
+    rng = np.random.default_rng(seed)
+    n = int(SR * seconds)
+    t = np.arange(n) / SR
+    sig = 0.3 * np.sin(2 * np.pi * 55 * t) + 0.25 * rng.normal(0, 0.3, n)
+    kick_t = np.arange(int(0.25 * SR)) / SR
+    kick = np.sin(2 * np.pi * (45 + 90 * np.exp(-kick_t * 28)) * kick_t)
+    kick *= np.exp(-kick_t * 9)
+    for k in range(int(seconds * bpm / 60)):
+        start = int(k * SR * 60 / bpm)
+        end = min(start + len(kick), n)
+        sig[start:end] += kick[: end - start]
+    sig *= 0.98 / np.abs(sig).max()
+    return np.stack([sig, sig], axis=1).astype(np.float32)
+
+
+def test_limit_leaves_a_quiet_signal_alone() -> None:
+    quiet = (0.5 * three_tones(100, 1000, 5000, 2)).astype(np.float32)
+
+    assert dj_mix.limit(quiet) is quiet
+
+
+def test_limit_keeps_the_peaks_under_the_ceiling_without_a_step() -> None:
+    pcm = three_tones(60, 1000, 6000, 4)
+    pcm[SR : SR + 2000] *= 3.0  # a burst that would clip
+    pcm = np.clip(pcm * 1.0, -4, 4)
+
+    limited = dj_mix.limit(pcm)
+
+    assert len(limited) == len(pcm)
+    assert np.abs(limited).max() <= 1.0
+    assert np.abs(limited).max() > 0.9  # not squashed far below the ceiling
+    # The gain dips and returns smoothly: no step that would click.
+    block = dj_mix.LIMIT_BLOCK
+    gains = []
+    for start in range(0, len(pcm) - block, block):
+        piece = pcm[start : start + block, 0]
+        ours = limited[start : start + block, 0]
+        loud = np.abs(piece) > 0.1
+        if loud.any():
+            gains.append(float(np.median(ours[loud] / piece[loud])))
+    assert min(gains) < 0.5  # it did dip
+    assert np.abs(np.diff(gains)).max() < 0.15
+    # Away from the burst the music is untouched.
+    assert (limited[: SR // 2] == pcm[: SR // 2]).all()
+    assert (limited[-SR // 2 :] == pcm[-SR // 2 :]).all()
+
+
+def test_limit_applies_the_same_gain_to_both_channels() -> None:
+    left = three_tones(60, 1000, 6000, 2)[:, 0]
+    pcm = np.stack([left * 4, left * 2], axis=1)
+
+    limited = dj_mix.limit(pcm)
+
+    # Where neither channel was clipped by the safety net, one gain for both.
+    free = (
+        (np.abs(pcm[:, 0]) > 0.05)
+        & (np.abs(pcm[:, 1]) > 0.05)
+        & (np.abs(limited).max(axis=1) < 0.999)
+    )
+    ratio = limited[free, 0] / pcm[free, 0] / (limited[free, 1] / pcm[free, 1])
+    assert free.sum() > 1000
+    assert ratio == pytest.approx(1.0, abs=1e-3)
+    assert np.abs(limited).max() <= 1.0
+
+
+def test_limit_lets_the_gain_come_back_after_a_peak() -> None:
+    pcm = 0.5 * three_tones(100, 1000, 5000, 3)
+    pcm[SR : SR + 400] *= 3.0
+
+    limited = dj_mix.limit(pcm)
+
+    after = slice(round(1.5 * SR), round(1.6 * SR))
+    ratio = limited[after, 0] / pcm[after, 0]
+    assert float(np.median(ratio)) > 0.97  # back to the full level in 0.1 s
+
+
+def test_blend_of_loud_tracks_clips_and_limit_fixes_it() -> None:
+    period = SR * 60 / 124
+    outgoing, incoming = loud_master(124, 12, 1), loud_master(124, 12, 2)
+
+    for kind in (dj_mix.Transition.BASS_SWAP, dj_mix.Transition.EQ_BLEND):
+        raw = dj_mix.blend(
+            kind,
+            outgoing,
+            incoming,
+            period,
+            effects=0.6,
+            rng=np.random.default_rng(0),
+        )
+        assert np.abs(raw).max() > 1.0  # the encoder would clip this
+        assert np.abs(dj_mix.limit(raw)).max() <= 1.0
+
+
+def test_tempo_glide_keeps_tones_clean() -> None:
+    t = np.arange(30 * SR) / SR
+    f0s = (220.0, 277.18, 329.63)
+    tone = sum(
+        sum(
+            0.12 / h * np.sin(2 * np.pi * f0 * h * t + 0.3 * h)
+            for h in range(1, 7)
+        )
+        for f0 in f0s
+    )
+    stereo = np.stack([tone, tone], axis=1).astype(np.float32)
+    length = round(16 * SR * 60 / 120)
+    speed = 120 / 132
+    margin = dj_mix.GLIDE_MARGIN
+
+    out, _, _ = dj_mix.tempo_glide(
+        stereo[: length + margin],
+        stereo[: round(length * speed) + margin],
+        120,
+        speed,
+        length,
+    )
+
+    middle = out[len(out) // 4 : 3 * len(out) // 4, 0].astype(np.float64)
+    spectrum = np.abs(np.fft.rfft(middle * np.hanning(len(middle)))) ** 2
+    freqs = np.fft.rfftfreq(len(middle), 1 / SR)
+    band = (freqs > 100) & (freqs < 4000)
+    near = np.zeros_like(freqs, dtype=bool)
+    for f0 in f0s:
+        for h in range(1, 7):
+            near |= np.abs(freqs - f0 * h) < 4
+    purity = spectrum[near & band].sum() / spectrum[band].sum()
+    # A narrow search window made tones phasey and "electronic" (about 0.8).
+    assert purity > 0.98, purity
+
+
+def test_tempo_glide_keeps_the_beats_in_music_with_tones() -> None:
+    def music(bpm: float, first_beat: float) -> np.ndarray:
+        t = np.arange(90 * SR) / SR
+        pad = sum(
+            0.12 * np.sin(2 * np.pi * f * t) for f in (220, 277.2, 329.6, 440)
+        )
+        pad = np.stack([pad, pad], axis=1).astype(np.float32)
+        return pad + click_track(bpm, 90, first_beat)
+
+    outgoing, incoming = music(120, 0.3), music(128, 0.17)
+    speed = 120 / 128
+    length = round(16 * SR * 0.5)
+    start, following_start = round(0.3 * SR), round(0.17 * SR)
+    margin = dj_mix.GLIDE_MARGIN
+
+    out, inc, grid = dj_mix.tempo_glide(
+        outgoing[start : start + length + margin],
+        incoming[
+            following_start : following_start + round(length * speed) + margin
+        ],
+        120,
+        speed,
+        length,
+    )
+
+    first, second = onsets(out, 0.5), onsets(inc, 0.5)
+    both = min(len(first), len(second), len(grid) - 1)
+    assert both >= 12
+    assert np.abs(first[:both] - second[:both]).max() / SR * 1000 < 12
+    assert np.abs(first[:both] - grid[:both]).max() / SR * 1000 < 12
+
+
+def test_attacks_are_found_where_a_kick_starts() -> None:
+    clicks = click_track(120, 6, first_beat=0.5)
+    mono = clicks.mean(axis=1)
+
+    flagged = np.flatnonzero(dj_mix._attacks(mono)) * dj_mix.GLIDE_BLOCK
+
+    # One flagged block per kick, on the kick (the beats are at 0.5, 1.0...).
+    beats = np.arange(0.5, 5.8, 0.5) * SR
+    for beat in beats:
+        assert np.abs(flagged - beat).min() < 2 * dj_mix.GLIDE_BLOCK
+    assert len(flagged) <= len(beats) * 2
+
+
+@pytest.mark.asyncio
+async def test_mix_limits_the_blend_and_reports_how_it_was_made() -> None:
+    def loud_deck(
+        title: str, seed: int, first_beat: float, *, matched: bool
+    ) -> dj.Deck:
+        pcm = loud_master(124, 90, seed)
+        return dj.Deck(title, pcm, dj_mix.analyze(pcm), beat_matched=matched)
+
+    radio = FakeRadio(
+        [
+            loud_deck("one", 1, 0.0, matched=False),
+            loud_deck("two", 2, 0.0, matched=True),
+        ]
+    )
+
+    pieces = await play_until_out_of_tracks_with_pieces(radio, effects=0.6)
+
+    played = np.concatenate([pcm for pcm, _ in pieces])
+    assert np.abs(played).max() <= 1.0  # nothing for the encoder to clip
+    (report,) = radio.reports
+    assert report.from_title == "one"
+    assert report.to_title == "two"
+    assert report.over_db >= 0
+    assert report.seconds > 4
+    assert report.kind in {"bass swap", "eq blend", "filter sweep", "crossfade"}
+
+
+async def play_until_out_of_tracks_with_pieces(
+    radio: FakeRadio, effects: float
+) -> list[tuple[np.ndarray, str]]:
+    pieces: list[tuple[np.ndarray, str]] = []
+
+    async def play() -> None:
+        async for piece in dj.mix(radio, effects):
+            pieces.append(piece)
+            await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="out of tracks"):
+        await play()
+    return pieces
+
+
+@pytest.mark.asyncio
+async def test_the_last_blends_are_listed_in_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(3)
+    first = await radio.next_deck(None)
+    second = await radio.next_deck(first.analysis)
+    app = dj.make_app(dj.Broadcaster(), radio)
+    report = dj.BlendReport(
+        "A",
+        "B",
+        "eq blend",
+        "drop",
+        True,
+        74.0,
+        140.1,
+        0.056,
+        13.0,
+        2.5,
+        "neighbour",
+        4.3,
+        1.0,
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        assert await (await client.get("/api/transitions")).json() == []
+
+        radio.transition(
+            dj_mix.Transition.EQ_BLEND,
+            first,
+            second,
+            dj_mix.Effect.DROP,
+            report,
+        )
+
+        (last,) = await (await client.get("/api/transitions")).json()
+        assert last["from"] == "A"
+        assert last["kind"] == "eq blend"
+        assert last["glide"] == pytest.approx(0.056)
+        assert last["over_db"] == pytest.approx(4.3)
+        assert last["from_bpm"] == 74.0
+        assert last["to_bpm"] == 140.1
+
+
+@pytest.mark.asyncio
+async def test_only_the_last_ten_blends_are_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack(n) for n in "ab"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(2)
+    first = await radio.next_deck(None)
+    second = await radio.next_deck(first.analysis)
+
+    for number in range(dj.MAX_RECENT_BLENDS + 3):
+        report = dj.BlendReport(
+            f"t{number}",
+            "x",
+            "bass swap",
+            "none",
+            True,
+            120.0,
+            120.0,
+            0.0,
+            8.0,
+            0.0,
+            "same",
+            0.0,
+            float(number),
+        )
+        radio.transition(
+            dj_mix.Transition.BASS_SWAP,
+            first,
+            second,
+            dj_mix.Effect.NONE,
+            report,
+        )
+
+    titles = [blend["from"] for blend in radio.recent_blends()]
+    assert titles == [f"t{n}" for n in range(3, dj.MAX_RECENT_BLENDS + 3)]

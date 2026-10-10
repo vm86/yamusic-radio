@@ -48,13 +48,22 @@ MAX_TEMPO_SHIFT = 0.15
 NEGLIGIBLE_TEMPO_SHIFT = 0.002
 
 # The tempo glide stretches the blend pieces by WSOLA: frames of GLIDE_WINDOW
-# samples overlap by half, and each is moved up to GLIDE_TOLERANCE samples
-# to continue the previous one without a jump. The search for the best place
-# is done on a signal decimated by GLIDE_DECIMATION.
+# samples overlap by half, and each is moved up to a tolerance to continue
+# the previous one without a jump. The search for the best place is done on
+# a signal decimated by GLIDE_DECIMATION.
 GLIDE_WINDOW = 2048
 GLIDE_HOP = GLIDE_WINDOW // 2
-GLIDE_TOLERANCE = 128
 GLIDE_DECIMATION = 4
+# A wide tolerance keeps tones clean (a narrow one makes them sound phasey
+# and electronic), but it lets the beats of two pieces drift apart by a few
+# ms. So a frame with an attack (a kick, a snare) in it, which has to stay
+# on the beat, may be moved only a little.
+GLIDE_TOLERANCE = 512
+GLIDE_ATTACK_TOLERANCE = 96
+# An attack: a block of GLIDE_BLOCK samples whose energy is this many times
+# that of the blocks before it.
+GLIDE_BLOCK = 256
+GLIDE_ATTACK_RATIO = 4.0
 # What a piece has to have beyond the span it plays, for the last frames.
 GLIDE_MARGIN = GLIDE_WINDOW + GLIDE_TOLERANCE
 
@@ -113,10 +122,10 @@ MIN_FILTERED_BLEND_SECONDS = 2.0
 # Club effects: loudness is relative to the blend they are added to.
 RISER_BEATS = 8
 RISER_FLOOR_HZ = 400.0
-RISER_GAIN = 1.2
+RISER_GAIN = 0.8
 IMPACT_SECONDS = 1.2
-IMPACT_GAIN = 3.0
-IMPACT_PEAK = 0.9
+IMPACT_GAIN = 2.0
+IMPACT_PEAK = 0.6
 # Echo-out for blends without a shared beat grid: where the outgoing track
 # is cut (share of the blend), the echo spacing and decay.
 ECHO_CUT_AT = 0.55
@@ -976,11 +985,25 @@ def filter_sweep(outgoing: Pcm, incoming: Pcm) -> Pcm:
     return blended.astype(np.float32)
 
 
+def _attacks(mono: npt.NDArray[np.float32]) -> npt.NDArray[np.bool_]:
+    """Flag the blocks of GLIDE_BLOCK samples that start an attack."""
+    block = GLIDE_BLOCK
+    energy = np.square(mono[: len(mono) // block * block], dtype=np.float64)
+    energy = energy.reshape(-1, block).sum(axis=1)
+    before = np.convolve(energy, np.ones(4) / 4, "full")[: len(energy)]
+    before = np.concatenate(
+        [[energy.max() if len(energy) else 0.0], before[:-1]]
+    )
+    floor = 1e-4 * block
+    return (energy > GLIDE_ATTACK_RATIO * before) & (energy > floor)
+
+
 def _best_start(
     coarse: npt.NDArray[np.float32],
     mono: npt.NDArray[np.float32],
     reference: int,
     nominal: int,
+    tolerance: int,
 ) -> int:
     """Find where to read the next frame so it follows the previous one.
 
@@ -988,7 +1011,7 @@ def _best_start(
     on at `reference`. It is looked for around `nominal`: first on the
     decimated signal, then at full resolution round the best place.
     """
-    hop, tolerance, step = GLIDE_HOP, GLIDE_TOLERANCE, GLIDE_DECIMATION
+    hop, step = GLIDE_HOP, GLIDE_DECIMATION
     size = hop // step
     ref = coarse[reference // step : reference // step + size]
     low = max((nominal - tolerance) // step, 0)
@@ -1046,6 +1069,7 @@ def _wsola(pcm: Pcm, positions: npt.NDArray[np.float64], frames: int) -> Pcm:
     first = rising.copy()
     first[:hop] = 1.0
 
+    attacks = _attacks(mono)
     out = np.zeros(((len(positions) - 1) * hop + window, CHANNELS), np.float32)
     last = len(padded) - window
     start = 0
@@ -1055,8 +1079,16 @@ def _wsola(pcm: Pcm, positions: npt.NDArray[np.float64], frames: int) -> Pcm:
         if m == 0:
             start, shape = nominal, first
         else:
+            new = attacks[
+                nominal // GLIDE_BLOCK : (nominal + window) // GLIDE_BLOCK + 1
+            ]
+            tolerance = GLIDE_ATTACK_TOLERANCE if new.any() else GLIDE_TOLERANCE
             start = min(
-                max(_best_start(coarse, mono, start + hop, nominal), 0), last
+                max(
+                    _best_start(coarse, mono, start + hop, nominal, tolerance),
+                    0,
+                ),
+                last,
             )
         out[m * hop : m * hop + window] += (
             padded[start : start + window] * (shape[:, None])
@@ -1169,6 +1201,53 @@ def echo_out(pcm: Pcm, cut: int, level: float) -> Pcm:
     spectrum, size = _spectrum(tail)
     result += _lowpass(spectrum, size, frames, ECHO_DARKEN_HZ)
     return result
+
+
+# The blend is limited so that its peaks stay under this; the gain is worked
+# out per block of LIMIT_BLOCK samples, is already down LIMIT_AHEAD blocks
+# before a peak and comes back up over about LIMIT_RELEASE blocks.
+LIMIT_CEILING = 0.97
+LIMIT_BLOCK = 64
+LIMIT_AHEAD = 4
+LIMIT_RELEASE = 0.02
+
+
+def limit(pcm: Pcm, ceiling: float = LIMIT_CEILING) -> Pcm:
+    """Keep the peaks of pcm under the ceiling by dipping its gain smoothly.
+
+    Two loud tracks, a riser and a boom add up to more than the 0 dBFS
+    that fits in the encoder, and anything beyond is clipped, which is
+    heard as crackle. The gain goes down ahead of such a peak and comes
+    back after it, the same for both channels.
+    """
+    frames = len(pcm)
+    if not frames or float(np.abs(pcm).max()) <= ceiling:
+        return pcm
+    block = LIMIT_BLOCK
+    count = ceil(frames / block)
+    peak = np.zeros(count * block, np.float32)
+    peak[:frames] = np.abs(pcm).max(axis=1)
+    need = np.minimum(
+        1.0, ceiling / np.maximum(peak.reshape(count, block).max(axis=1), 1e-9)
+    )
+
+    # The gain is already low where a peak is about to come: a minimum
+    # over the blocks around, smoothed by a moving average of the same width.
+    width = 2 * LIMIT_AHEAD + 1
+    padded = np.pad(need, LIMIT_AHEAD, constant_values=1.0)
+    held = np.min(np.lib.stride_tricks.sliding_window_view(padded, width), 1)
+    padded = np.pad(held, LIMIT_AHEAD, constant_values=1.0)
+    gain = np.convolve(padded, np.ones(width) / width, "valid")
+    # And back up slowly, never above what the peaks allow.
+    for index in range(1, count):
+        recovered = gain[index - 1] + LIMIT_RELEASE * (1 - gain[index - 1])
+        gain[index] = min(gain[index], recovered)
+
+    centers = (np.arange(count) + 0.5) * block
+    per_sample = np.interp(np.arange(frames), centers, gain)
+    limited: Pcm = pcm * per_sample[:, None].astype(np.float32)
+    # What the smoothing can't catch, to the last sample.
+    return np.clip(limited, -1.0, 1.0).astype(np.float32)
 
 
 def _rms(pcm: Pcm) -> float:

@@ -104,7 +104,6 @@ class YandexMusicPlayer(ClientAsync):
         "token": None,
         "from_id": f"music-{uuid.uuid4()}",
         "quality": "lossless",
-        "blacklist": [],
     }
 
     # Yandex answers 429 above a few simultaneous get-file-info requests;
@@ -251,8 +250,6 @@ class YandexMusicPlayer(ClientAsync):
                 continue
             track = ExtendTrack.from_track(sequence_track.track)
             if track.track_id in exclude_track_ids or not track.available:
-                continue
-            if track.genre in self.config["blacklist"]:
                 continue
             track.station_id = station_id
             track.batch_id = station_tracks.batch_id

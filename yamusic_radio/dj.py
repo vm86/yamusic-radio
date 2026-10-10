@@ -88,6 +88,7 @@ MAX_LISTED = 15
 # What is kept in the cache across restarts (see Radio.restore_state).
 SETTING_MOODS = "moods"
 SETTING_GENRES = "genres"
+SETTING_BLOCKED = "blocked_genres"
 SETTING_STATION = "station_settings"
 # The genres of My Wave known so far: offered while the cache has none yet.
 KNOWN_GENRES = (
@@ -370,6 +371,9 @@ class Radio:
         # the first become the second only when the queue is rebuilt.
         self._wanted_genres: tuple[str, ...] = ()
         self._allowed_genres: tuple[str, ...] = ()
+        # Genres that are never played: picked, and in force (the same way).
+        self._wanted_blocked: tuple[str, ...] = ()
+        self._allowed_blocked: tuple[str, ...] = ()
         # Tracks of other genres that the station offered: not asked again
         # for as long as the genres stay the same.
         self._off_genre: set[str] = set()
@@ -467,6 +471,12 @@ class Radio:
             # Nothing is queued yet, so they are in force at once.
             self._wanted_genres = tuple(g for g in genres if isinstance(g, str))
             self._allowed_genres = self._wanted_genres
+        blocked = self._cache.get_setting(SETTING_BLOCKED)
+        if isinstance(blocked, list):
+            self._wanted_blocked = tuple(
+                b for b in blocked if isinstance(b, str)
+            )
+            self._allowed_blocked = self._wanted_blocked
         moods = self._cache.get_setting(SETTING_MOODS)
         if isinstance(moods, list) and moods:
             await self.set_allowed_moods(m for m in moods if isinstance(m, str))
@@ -531,11 +541,17 @@ class Radio:
         selected now. Nothing is downloaded for it.
         """
         self._generation += 1
-        if self._allowed_genres != self._wanted_genres:
+        if (self._allowed_genres, self._allowed_blocked) != (
+            self._wanted_genres,
+            self._wanted_blocked,
+        ):
             self._allowed_genres = self._wanted_genres
+            self._allowed_blocked = self._wanted_blocked
             self._off_genre.clear()
             log.info(
-                "Genres played: %s", ", ".join(self._allowed_genres) or "any"
+                "Genres played: %s; never played: %s",
+                ", ".join(self._allowed_genres) or "any",
+                ", ".join(self._allowed_blocked) or "none",
             )
         deck, self._next = self._next, None
         if deck is not None:
@@ -575,6 +591,8 @@ class Radio:
         return not self._allowed_moods or mood in self._allowed_moods
 
     def _genre_allowed(self, genre: str) -> bool:
+        if genre in self._allowed_blocked:
+            return False
         return not self._allowed_genres or genre in self._allowed_genres
 
     def _drop_unwanted(self) -> None:
@@ -589,17 +607,29 @@ class Radio:
         self._wanted_genres = tuple(dict.fromkeys(genres))
         self._remember(SETTING_GENRES, list(self._wanted_genres))
 
+    def set_blocked_genres(self, genres: Iterable[str]) -> None:
+        """Pick the genres never to play, in force like the wanted ones."""
+        self._wanted_blocked = tuple(dict.fromkeys(genres))
+        self._remember(SETTING_BLOCKED, list(self._wanted_blocked))
+
     def genres_info(self) -> dict[str, object]:
         """Genres to pick from, the ones picked and the ones in force."""
         known = self._cache.known_genres() if self._cache is not None else []
         available = [name for name, _ in known] or list(KNOWN_GENRES)
-        for genre in (*self._wanted_genres, *self._allowed_genres):
+        for genre in (
+            *self._wanted_genres,
+            *self._allowed_genres,
+            *self._wanted_blocked,
+            *self._allowed_blocked,
+        ):
             if genre not in available:
                 available.append(genre)
         return {
             "available": available,
             "selected": list(self._wanted_genres),
             "applied": list(self._allowed_genres),
+            "blocked": list(self._wanted_blocked),
+            "blocked_applied": list(self._allowed_blocked),
         }
 
     def queue(
@@ -1612,6 +1642,16 @@ def _add_genres_api(app: web.Application, radio: Radio) -> None:
         radio.set_wanted_genres([])
         return web.json_response(radio.genres_info())
 
+    async def put_blocked(request: web.Request) -> web.Response:
+        radio.set_blocked_genres(_parse_genres(await _json_body(request)))
+        return web.json_response(radio.genres_info())
+
+    async def delete_blocked(_: web.Request) -> web.Response:
+        radio.set_blocked_genres([])
+        return web.json_response(radio.genres_info())
+
+    app.router.add_put("/api/genres/blocked", put_blocked)
+    app.router.add_delete("/api/genres/blocked", delete_blocked)
     app.router.add_get("/api/genres", get_genres)
     app.router.add_put("/api/genres", put_genres)
     app.router.add_delete("/api/genres", delete_genres)

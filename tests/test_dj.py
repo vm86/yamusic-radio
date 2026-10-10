@@ -3009,3 +3009,49 @@ async def test_allowed_moods_can_be_given_as_any_iterable(
     await radio.set_allowed_moods(m for m in ("fun", "calm", "angry"))
 
     assert radio.allowed_moods == ("calm", "fun")
+
+
+@pytest.mark.asyncio
+async def test_blocked_genres_wait_for_the_refresh_and_win_over_picked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = genre_radio(
+        tmp_path,
+        monkeypatch,
+        [
+            FakeTrack("a", genre="house"),
+            FakeTrack("b", genre="rap"),
+            FakeTrack("c", genre="rock"),
+        ],
+    )
+    await radio.fill(3)
+
+    radio.set_wanted_genres(["house", "rap"])
+    radio.set_blocked_genres(["rap"])
+
+    info = radio.genres_info()
+    assert info["blocked"] == ["rap"]
+    assert info["blocked_applied"] == []
+    assert len(radio.pool) == 3
+
+    radio.refresh_queue()
+
+    assert radio.genres_info()["blocked_applied"] == ["rap"]
+    assert [c.title for c in radio.pool] == ["a"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_genres_come_back_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    first.set_blocked_genres(["rap", "rap", "metal"])
+    track_cache.put_setting("genres", [])
+
+    again, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await again.restore_state()
+
+    info = again.genres_info()
+    assert info["blocked"] == ["rap", "metal"]
+    assert info["blocked_applied"] == ["rap", "metal"]
+    assert {"rap", "metal"} <= set(info["available"])  # type: ignore[arg-type]

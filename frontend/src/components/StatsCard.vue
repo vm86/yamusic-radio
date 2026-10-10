@@ -14,6 +14,8 @@ interface Row {
   name: string;
   count: number;
   share: number;
+  /** Left out of the shares above it: shown dimmer. */
+  muted?: boolean;
 }
 
 function rows(counts: Record<string, number>, names: Record<string, string>, total: number): Row[] {
@@ -40,17 +42,22 @@ const effects = computed(() => {
   const total = Object.values(known).reduce((sum, count) => sum + count, 0);
   return rows(known, EFFECTS, total);
 });
+// The blends whose keys are not known are left out of the shares of the
+// quality: a bar of their own says how many there are, of all the blends.
 const quality = computed(() => {
-  const { good, fair, poor } = data.value.by_quality;
-  return rows({ good, fair, poor }, QUALITY, good + fair + poor);
-});
-// The share of the blends whose keys are not known, which are left out of
-// the quality of the keys.
-const unknownShare = computed(() => {
-  const { unknown } = data.value.by_quality;
-  if (!unknown || !data.value.total) return "";
-  const share = (unknown / data.value.total) * 100;
-  return share < 1 ? "<1%" : `${Math.round(share)}%`;
+  const { good, fair, poor, unknown } = data.value.by_quality;
+  const found = rows({ good, fair, poor }, QUALITY, good + fair + poor);
+  if (!unknown || !data.value.total) return found;
+  return [
+    ...found,
+    {
+      key: "unknown",
+      name: "Тональность неизвестна, не учтены",
+      count: unknown,
+      share: (unknown / data.value.total) * 100,
+      muted: true,
+    },
+  ];
 });
 </script>
 
@@ -70,10 +77,9 @@ const unknownShare = computed(() => {
       <div v-for="row in group.rows" :key="row.key" class="stat">
         <span>{{ row.name }}</span>
         <span class="n">{{ row.count }} · {{ Math.round(row.share) }}%</span>
-        <div class="meter"><i :style="{ width: `${row.share}%` }" /></div>
+        <div class="meter" :class="{ muted: row.muted }"><i :style="{ width: `${row.share}%` }" /></div>
       </div>
     </template>
-    <p v-if="unknownShare" class="hint">Ещё {{ unknownShare }} — тональность неизвестна, не учтены.</p>
   </section>
 </template>
 
@@ -84,4 +90,6 @@ h3:first-of-type { margin-top: 0; }
 .stat .n { font: var(--md-sys-typescale-label-large); color: var(--md-sys-color-on-surface-variant); }
 .meter { grid-column: 1 / -1; height: 4px; border-radius: var(--md-sys-shape-corner-full); background: var(--md-sys-color-secondary-container); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--md-sys-color-primary); }
+.meter.muted > i { background: var(--md-sys-color-outline); }
+.stat:has(.meter.muted) { color: var(--md-sys-color-on-surface-variant); }
 </style>

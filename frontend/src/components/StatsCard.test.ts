@@ -58,26 +58,41 @@ describe("StatsCard", () => {
     expect(wrapper.text()).toContain("за всё время");
   });
 
-  it("tells the share of the blends with an unknown key, in percent", () => {
+  it("shows the blends with an unknown key as a bar of their own, not as text", () => {
     const stats: Stats = {
       session: data({ total: 151, by_quality: { good: 53, fair: 28, poor: 11, unknown: 6 } }),
       all_time: null,
     };
     const wrapper = mount(StatsCard, { props: { stats } });
 
-    expect(wrapper.text()).toContain("Ещё 4% — тональность неизвестна, не учтены.");
-    expect(wrapper.text()).not.toContain("Ещё 6 ");
+    const quality = groups(wrapper)["Удачность по тональностям"];
+    expect(quality).toHaveLength(4);
+    expect(quality?.at(-1)).toBe("Тональность неизвестна, не учтены 6 · 4%");
+    // A bar, 4% wide, dimmer than the others.
+    const bars = wrapper.findAll(".meter.muted > i");
+    expect(bars).toHaveLength(1);
+    expect(bars[0]!.attributes("style")).toContain("width: 3.97");
+    // And no sentence about it any more.
+    expect(wrapper.find(".hint.unknown").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Ещё");
   });
 
-  it("says less than 1% for a few blends, and nothing when all keys are known", async () => {
-    const few = data({ total: 1000, by_quality: { good: 900, fair: 90, poor: 6, unknown: 4 } });
-    const wrapper = mount(StatsCard, { props: { stats: { session: few, all_time: null } } });
-    expect(wrapper.text()).toContain("Ещё <1% — тональность неизвестна");
+  it("leaves the shares of the known keys out of the bar of the unknown ones", () => {
+    const stats: Stats = {
+      session: data({ total: 100, by_quality: { good: 50, fair: 30, poor: 10, unknown: 10 } }),
+      all_time: null,
+    };
+    const quality = groups(mount(StatsCard, { props: { stats } }))["Удачность по тональностям"];
+    // 50 of the 90 that have a key, and 10 of all 100.
+    expect(quality?.[0]).toBe("Удачные 50 · 56%");
+    expect(quality?.[3]).toBe("Тональность неизвестна, не учтены 10 · 10%");
+  });
 
-    await wrapper.setProps({
-      stats: { session: data({ by_quality: { good: 5, fair: 3, poor: 2, unknown: 0 } }), all_time: null },
-    });
-    expect(wrapper.text()).not.toContain("тональность неизвестна");
+  it("has no such bar when every key is known", () => {
+    const known = data({ by_quality: { good: 5, fair: 3, poor: 2, unknown: 0 } });
+    const wrapper = mount(StatsCard, { props: { stats: { session: known, all_time: null } } });
+    expect(groups(wrapper)["Удачность по тональностям"]).toHaveLength(3);
+    expect(wrapper.find(".meter.muted").exists()).toBe(false);
   });
 
   it("is hidden until there is a blend", () => {

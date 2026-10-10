@@ -102,9 +102,7 @@ class DownloadInfo(YandexMusicObject):
 class YandexMusicPlayer(ClientAsync):
     _default_settings: ClassVar[dict[str, Any]] = {
         "token": None,
-        "last_track": None,
         "from_id": f"music-{uuid.uuid4()}",
-        "station_id": "user:onyourwave",
         "quality": "lossless",
         "blacklist": [],
     }
@@ -118,7 +116,7 @@ class YandexMusicPlayer(ClientAsync):
         settings_path: Path,
         client_session: ClientSession,
     ) -> None:
-        self.__last_track: str = ""
+        self.__last_track: str | None = None
         self.__last_station_id: tuple[str, str] = ("", "")
         self.__settings: dict[str, Any] = {}
         self.__auth_url: str | None = None
@@ -131,7 +129,6 @@ class YandexMusicPlayer(ClientAsync):
                 **self._default_settings,
                 **json.loads(self.__settings_path.read_text()),
             }
-            self.__last_track = self.__settings["last_track"]
         except FileNotFoundError:
             self.__settings = {**self._default_settings}
             self.save_settings()

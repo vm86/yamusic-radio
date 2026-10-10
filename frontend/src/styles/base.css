@@ -67,9 +67,9 @@ button { font-family: inherit; color: inherit; }
 .tag.key {
   display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; padding: 0 8px;
   border: 1px solid var(--md-sys-color-outline-variant); border-radius: var(--md-sys-shape-corner-small);
-  color: var(--md-sys-color-on-surface); font-weight: 600;
+  color: var(--md-sys-color-on-surface); font-weight: 500;
 }
-.assist.key { gap: 8px; color: var(--md-sys-color-on-surface); font-weight: 600; }
+.assist.key { gap: 8px; color: var(--md-sys-color-on-surface); font-weight: 500; }
 
 /* Filter chips: 32dp tall, with a 48dp touch target */
 .chips { display: flex; flex-wrap: wrap; gap: 16px 8px; margin-top: 20px; }

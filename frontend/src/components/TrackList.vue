@@ -58,7 +58,7 @@ function sub(track: TrackInfo): string {
 .item.ready .cover { outline: 2px solid var(--md-sys-color-primary); outline-offset: 2px; }
 .item.forecast .cover { outline: 1px dashed var(--md-sys-color-outline); outline-offset: 2px; }
 .item.past .cover { filter: saturate(0.5); }
-.pos { font-weight: 600; color: var(--md-sys-color-on-surface); }
+.pos { font-weight: 500; color: var(--md-sys-color-on-surface); }
 .text { flex: 1; min-width: 0; }
 .t {
   font: var(--md-sys-typescale-body-large);

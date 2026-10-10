@@ -43,7 +43,10 @@ h1 {
   letter-spacing: var(--md-sys-typescale-title-large-tracking);
   flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-@media (max-width: 420px) { h1 { font-size: 18px; } }
+/* The compact window class: the smaller title of the scale */
+@media (max-width: 599px) {
+  h1 { font: var(--md-sys-typescale-title-medium); letter-spacing: var(--md-sys-typescale-title-medium-tracking); }
+}
 .live {
   display: inline-flex; align-items: center; gap: 8px;
   height: 32px; padding: 0 12px; border-radius: var(--md-sys-shape-corner-small);

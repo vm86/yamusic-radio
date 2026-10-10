@@ -31,7 +31,7 @@ const ready = computed(() => Boolean(props.auth.url && props.auth.code));
 .code {
   margin: 16px 0; padding: 12px 16px; border-radius: var(--md-sys-shape-corner-small);
   background: color-mix(in srgb, currentColor 10%, transparent);
-  font: 500 28px/36px var(--md-ref-typeface-mono); letter-spacing: 4px; text-align: center;
+  font: var(--md-sys-typescale-headline-small); font-family: var(--md-ref-typeface-mono); font-weight: 500; letter-spacing: 4px; text-align: center;
   user-select: all;
 }
 </style>

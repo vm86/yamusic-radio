@@ -52,8 +52,32 @@ describe("StatsCard", () => {
     const wrapper = mount(StatsCard, { props: { stats } });
 
     expect(groups(wrapper)["Эффекты"]).toEqual(["Без эффектов 6 · 60%", "Райзер и удар 4 · 40%"]);
-    expect(wrapper.text()).toContain("Ещё 90 переходов — до учёта эффектов");
+    // No word about them: they are not a row and not a hint.
+    expect(wrapper.text()).not.toContain("до учёта эффектов");
+    expect(wrapper.text()).not.toContain("90");
     expect(wrapper.text()).toContain("за всё время");
+  });
+
+  it("tells the share of the blends with an unknown key, in percent", () => {
+    const stats: Stats = {
+      session: data({ total: 151, by_quality: { good: 53, fair: 28, poor: 11, unknown: 6 } }),
+      all_time: null,
+    };
+    const wrapper = mount(StatsCard, { props: { stats } });
+
+    expect(wrapper.text()).toContain("Ещё 4% — тональность неизвестна, не учтены.");
+    expect(wrapper.text()).not.toContain("Ещё 6 ");
+  });
+
+  it("says less than 1% for a few blends, and nothing when all keys are known", async () => {
+    const few = data({ total: 1000, by_quality: { good: 900, fair: 90, poor: 6, unknown: 4 } });
+    const wrapper = mount(StatsCard, { props: { stats: { session: few, all_time: null } } });
+    expect(wrapper.text()).toContain("Ещё <1% — тональность неизвестна");
+
+    await wrapper.setProps({
+      stats: { session: data({ by_quality: { good: 5, fair: 3, poor: 2, unknown: 0 } }), all_time: null },
+    });
+    expect(wrapper.text()).not.toContain("тональность неизвестна");
   });
 
   it("is hidden until there is a blend", () => {

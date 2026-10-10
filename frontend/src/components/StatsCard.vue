@@ -33,14 +33,10 @@ const rhythm = computed(() =>
     data.value.total,
   ),
 );
-// Blends made before the effects were counted are not told apart: say so
-// instead of showing them as a row.
-const effectCounts = computed(() => {
-  const { unknown, ...known } = data.value.by_effect;
-  return { known, unknown: unknown ?? 0 };
-});
+// Blends made before the effects were counted can't be told apart: they are
+// not a row, and not counted in the shares.
 const effects = computed(() => {
-  const { known } = effectCounts.value;
+  const { unknown: _unknown, ...known } = data.value.by_effect;
   const total = Object.values(known).reduce((sum, count) => sum + count, 0);
   return rows(known, EFFECTS, total);
 });
@@ -48,7 +44,14 @@ const quality = computed(() => {
   const { good, fair, poor } = data.value.by_quality;
   return rows({ good, fair, poor }, QUALITY, good + fair + poor);
 });
-const unknown = computed(() => data.value.by_quality.unknown);
+// The share of the blends whose keys are not known, which are left out of
+// the quality of the keys.
+const unknownShare = computed(() => {
+  const { unknown } = data.value.by_quality;
+  if (!unknown || !data.value.total) return "";
+  const share = (unknown / data.value.total) * 100;
+  return share < 1 ? "<1%" : `${Math.round(share)}%`;
+});
 </script>
 
 <template>
@@ -70,10 +73,7 @@ const unknown = computed(() => data.value.by_quality.unknown);
         <div class="meter"><i :style="{ width: `${row.share}%` }" /></div>
       </div>
     </template>
-    <p v-if="effectCounts.unknown" class="hint">
-      Ещё {{ effectCounts.unknown }} переходов — до учёта эффектов, в «Эффектах» не учтены.
-    </p>
-    <p v-if="unknown" class="hint">Ещё {{ unknown }} — тональность неизвестна, не учтены.</p>
+    <p v-if="unknownShare" class="hint">Ещё {{ unknownShare }} — тональность неизвестна, не учтены.</p>
   </section>
 </template>
 

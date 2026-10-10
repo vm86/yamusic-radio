@@ -179,3 +179,44 @@ describe("picking moods", () => {
     wrapper.unmount();
   });
 });
+
+describe("the next track button", () => {
+  const track = (title: string) => ({
+    track_id: title,
+    title,
+    artists: [],
+    bpm: 120,
+    loudness_db: -9,
+    duration_seconds: 200,
+    mood: "",
+    camelot: "",
+    key: "",
+    decided: true,
+    cover: "",
+  });
+
+  it("marks the request as waiting without touching the lists", async () => {
+    const full: Queue = {
+      ...queueOf(moodsOf([])),
+      previous: [track("p1"), track("p2")],
+      next: [track("n1"), track("n2"), track("n3")],
+    };
+    api.queue.mockResolvedValue(full);
+    // What an older server answers: a part of the queue.
+    api.nextTrack.mockResolvedValue({
+      ...queueOf(moodsOf([])),
+      next: [track("n1")],
+      skip_pending: true,
+    });
+    const { radio, wrapper } = setup();
+    await settle();
+    expect(radio.queue.value?.next).toHaveLength(3);
+
+    await radio.nextTrack();
+
+    expect(radio.queue.value?.skip_pending).toBe(true);
+    expect(radio.queue.value?.next.map((t) => t.title)).toEqual(["n1", "n2", "n3"]);
+    expect(radio.queue.value?.previous).toHaveLength(2);
+    wrapper.unmount();
+  });
+});

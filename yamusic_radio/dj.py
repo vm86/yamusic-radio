@@ -1636,8 +1636,9 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
             radio.request_skip()
         except SkipRefusedError as error:
             raise web.HTTPConflict(text=str(error)) from None
-        # 202: the blend starts when there is a good beat for it.
-        return web.json_response(radio.queue(0, 1), status=202)
+        # 202: the blend starts when there is a good beat for it. The whole
+        # queue, like GET /api/queue gives it, not a part to be taken for it.
+        return web.json_response(radio.queue(), status=202)
 
     app.router.add_post("/api/queue/refresh", refresh_queue)
     app.router.add_post("/api/next", next_track)

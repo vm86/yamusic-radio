@@ -118,7 +118,10 @@ export function useRadio() {
   // request has been taken (skip_pending goes back to false).
   async function nextTrack(): Promise<void> {
     try {
-      takeQueue(await api.nextTrack());
+      // Only the news is taken from the answer: that the request waits for a
+      // beat. The lists stay as they are, or they would flicker.
+      const { skip_pending } = await api.nextTrack();
+      if (queue.value) queue.value = { ...queue.value, skip_pending };
       toast("Следующий трек: переход начнётся на ближайшем сильном бите");
     } catch (error) {
       const reason = (error as Error).message;

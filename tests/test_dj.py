@@ -2314,9 +2314,18 @@ async def test_rest_api_next_track(
 
         playing = await radio.next_deck(None)
         radio.started(playing)
+        before = await (await client.get("/api/queue")).json()
         reply = await client.post("/api/next")
         assert reply.status == 202
-        assert (await reply.json())["skip_pending"] is True
+        answer = await reply.json()
+        assert answer["skip_pending"] is True
+        # The whole queue: a client that takes it for the queue must not see
+        # the lists shrink.
+        assert len(answer["next"]) == len(before["next"]) > 1
+        assert [t["title"] for t in answer["next"]] == [
+            t["title"] for t in before["next"]
+        ]
+        assert answer["now"]["title"] == before["now"]["title"]
         queue = await (await client.get("/api/queue")).json()
         assert queue["skip_pending"] is True
 

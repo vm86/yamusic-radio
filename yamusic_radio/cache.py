@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS transitions (
     to_key TEXT,
     effect TEXT
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS tracks_played ON tracks (played_at);
 CREATE INDEX IF NOT EXISTS tracks_used ON tracks (used_at);
 """
@@ -79,6 +83,32 @@ class TrackCache:
 
     def close(self) -> None:
         self._db.close()
+
+    def get_setting(self, key: str) -> object:
+        """Return what put_setting kept under the key, None if nothing."""
+        row = self._db.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            log.warning("Ignoring the setting %s: it is not JSON", key)
+            return None
+
+    def put_setting(self, key: str, value: object) -> None:
+        """Keep a JSON-able value (the moods picked, ...) across restarts."""
+        self._db.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps(value)),
+        )
+        self._db.commit()
+
+    def delete_setting(self, key: str) -> None:
+        self._db.execute("DELETE FROM settings WHERE key = ?", (key,))
+        self._db.commit()
 
     def get_analysis(self, track_id: str, codec: str) -> TrackAnalysis | None:
         row = self._db.execute(

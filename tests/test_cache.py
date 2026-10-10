@@ -180,3 +180,39 @@ def test_analysis_without_a_key_is_made_again_by_essentia(
     )
     cache.put_analysis("1", "mp3", "A - B", keyless)
     assert cache.get_analysis("1", "mp3") == keyless
+
+
+def test_settings_survive_a_reopen_and_can_be_changed_and_deleted(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.db"
+    cache = TrackCache(path)
+    assert cache.get_setting("moods") is None
+
+    cache.put_setting("moods", ["calm", "fun"])
+    cache.put_setting(
+        "station_settings",
+        {"station": "user:onyourwave", "settings": ["all", "default", "any"]},
+    )
+    cache.put_setting("moods", ["active"])  # replaced
+    cache.close()
+
+    reopened = TrackCache(path)
+    assert reopened.get_setting("moods") == ["active"]
+    assert reopened.get_setting("station_settings") == {
+        "station": "user:onyourwave",
+        "settings": ["all", "default", "any"],
+    }
+    reopened.delete_setting("station_settings")
+    reopened.delete_setting("nothing")  # not an error
+    assert reopened.get_setting("station_settings") is None
+    assert reopened.get_setting("moods") == ["active"]
+    reopened.close()
+
+
+def test_a_setting_that_is_not_json_is_ignored(track_cache: TrackCache) -> None:
+    track_cache._db.execute(  # noqa: SLF001
+        "INSERT INTO settings (key, value) VALUES ('moods', '{not json')"
+    )
+
+    assert track_cache.get_setting("moods") is None

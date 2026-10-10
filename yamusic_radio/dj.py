@@ -85,6 +85,10 @@ REPLENISH_RETRY_SECONDS = 120
 MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
 MAX_LISTED = 15
+# What is kept in the cache across restarts (see Radio.restore_state).
+SETTING_MOODS = "moods"
+SETTING_GENRES = "genres"
+SETTING_STATION = "station_settings"
 # The blends kept to look at (see Radio.recent_blends).
 MAX_RECENT_BLENDS = 10
 # A beat grid of a blend needs at least this many points to give a period.
@@ -388,24 +392,74 @@ class Radio:
     def played(self) -> OrderedDict[str, Played]:
         return self._played
 
+    def _remember(self, key: str, value: object) -> None:
+        if self._cache is not None:
+            self._cache.put_setting(key, value)
+
+    def _forget(self, key: str) -> None:
+        if self._cache is not None:
+            self._cache.delete_setting(key)
+
     async def start_mood_arc(self) -> None:
-        """Remember the station's settings, to put them back at the end."""
+        """Remember the station's settings, to put them back at the end.
+
+        They are kept on disk as well, for as long as the account has
+        something else: if the radio is killed, the next run puts them back.
+        """
         self._saved_settings = await self._player.station_settings(
             self._station_id
         )
         self._mood = self._saved_settings[0]
+        self._remember(
+            SETTING_STATION,
+            {"station": self._station_id, "settings": self._saved_settings},
+        )
 
     async def restore_settings(self) -> None:
         """Put the station's settings back as they were."""
-        if (
-            self._saved_settings is None
-            or self._mood == self._saved_settings[0]
-        ):
+        if self._saved_settings is None:
             return
-        await self._player.set_station_settings(
-            self._station_id, *self._saved_settings
-        )
-        self._mood = self._saved_settings[0]
+        if self._mood != self._saved_settings[0]:
+            await self._player.set_station_settings(
+                self._station_id, *self._saved_settings
+            )
+            self._mood = self._saved_settings[0]
+        self._forget(SETTING_STATION)
+
+    async def restore_state(self) -> None:
+        """Take up where the last run left off.
+
+        If it was killed with the station's settings changed, they are put
+        back first; then the moods and the genres that were picked are
+        picked again. Needs the app to be authorized.
+        """
+        if self._cache is None:
+            return
+        left = self._cache.get_setting(SETTING_STATION)
+        if isinstance(left, dict):
+            try:
+                await self._player.set_station_settings(
+                    str(left["station"]), *left["settings"]
+                )
+            except (KeyError, TypeError, ValueError):
+                log.warning("Ignoring the station settings left on disk")
+                self._forget(SETTING_STATION)
+            except Exception:
+                # Left for the next run, which may be able to.
+                log.exception("Could not put the station's settings back")
+            else:
+                log.info(
+                    "The station's settings put back (the last run left them)"
+                )
+                self._forget(SETTING_STATION)
+        genres = self._cache.get_setting(SETTING_GENRES)
+        if isinstance(genres, list):
+            # Nothing is queued yet, so they are in force at once.
+            self._wanted_genres = tuple(g for g in genres if isinstance(g, str))
+            self._allowed_genres = self._wanted_genres
+        moods = self._cache.get_setting(SETTING_MOODS)
+        if isinstance(moods, list) and moods:
+            await self.set_allowed_moods(m for m in moods if isinstance(m, str))
 
     @property
     def authorized(self) -> bool:
@@ -425,6 +479,11 @@ class Radio:
         return self._allowed_moods
 
     @property
+    def mood_arc_saved(self) -> tuple[str, str, str] | None:
+        """The station's settings put aside, None before that."""
+        return self._saved_settings
+
+    @property
     def mood(self) -> str:
         """The mood setting the station has now."""
         return self._mood
@@ -440,6 +499,7 @@ class Radio:
         if wanted and self._saved_settings is None:
             await self.start_mood_arc()
         self._allowed_moods = wanted
+        self._remember(SETTING_MOODS, list(wanted))
         if not wanted and not self._mood_arc:
             await self.restore_settings()
             self._saved_settings = None
@@ -517,6 +577,7 @@ class Radio:
     def set_wanted_genres(self, genres: Iterable[str]) -> None:
         """Pick the genres. The queue follows them once it is rebuilt."""
         self._wanted_genres = tuple(dict.fromkeys(genres))
+        self._remember(SETTING_GENRES, list(self._wanted_genres))
 
     def genres_info(self) -> dict[str, object]:
         """Genres to pick from, the ones picked and the ones in force."""
@@ -1802,7 +1863,12 @@ async def serve(
             # Waiting for the user to authorize the app.
             while not player.is_init:  # noqa: ASYNC110
                 await sleep(2)
-            if mood_arc:
+            # What the last run left: a failure here must not stop the radio.
+            try:
+                await radio.restore_state()
+            except Exception:
+                log.exception("Could not take up the picks of the last run")
+            if mood_arc and radio.mood_arc_saved is None:
                 await radio.start_mood_arc()
             log.info("Preparing %d tracks from %s...", pool_size, station_id)
             await radio.fill()

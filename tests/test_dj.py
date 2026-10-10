@@ -2821,6 +2821,162 @@ async def test_stream_starts_with_the_preroll() -> None:
     assert waited < 1.0
 
 
+def persistent_radio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cache: TrackCache,
+    player: FakePlayer | None = None,
+) -> tuple[dj.Radio, FakePlayer]:
+    """Make a radio on the cache, like a run of the program."""
+    player = player or FakePlayer([[FakeTrack(f"t{n}") for n in range(12)]])
+    return make_radio(tmp_path, monkeypatch, player, {}, cache=cache), player
+
+
+@pytest.mark.asyncio
+async def test_picked_moods_come_back_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await first.set_allowed_moods(["fun", "calm"])
+    await first.restore_settings()  # a clean stop
+
+    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    assert again.allowed_moods == ()  # nothing yet
+
+    await again.restore_state()
+
+    assert again.allowed_moods == ("calm", "fun")
+    assert again.moods_info()["selected"] == ["calm", "fun"]
+    # The account was read for putting it back, and what comes is of the moods.
+    await again.fill(3)
+    assert {c.mood for c in again.pool} <= {"calm", "fun"}
+    assert player.settings
+    assert {mood for mood, _, _ in player.settings} <= {"calm", "fun"}
+
+
+@pytest.mark.asyncio
+async def test_no_moods_stay_no_moods_and_the_account_is_not_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await first.set_allowed_moods(["calm"])
+    await first.set_allowed_moods([])  # picked and cleared
+    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+
+    await again.restore_state()
+
+    assert again.allowed_moods == ()
+    assert again.mood_arc_saved is None
+    assert player.settings == []
+
+
+@pytest.mark.asyncio
+async def test_a_killed_run_leaves_the_station_settings_for_the_next_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, first_player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await first.set_allowed_moods(["calm"])
+    await first.fill(3)  # the account is set to calm now
+    assert first_player.settings[-1][0] == "calm"
+    # ... and the process is killed: no restore_settings.
+
+    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await again.restore_state()
+
+    # The account was put back first, then the pick was applied again.
+    assert player.settings[0] == ("all", "default", "any")
+    assert again.allowed_moods == ("calm",)
+    assert again.mood_arc_saved == ("all", "default", "any")
+    # A clean stop of this run puts it back and forgets it.
+    await again.fill(3)
+    await again.restore_settings()
+    assert player.settings[-1] == ("all", "default", "any")
+    assert track_cache.get_setting("station_settings") is None
+    assert track_cache.get_setting("moods") == ["calm"]  # still picked
+
+
+@pytest.mark.asyncio
+async def test_a_clean_stop_forgets_the_station_settings_but_not_the_picks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    radio, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await radio.set_allowed_moods(["fun"])
+    assert track_cache.get_setting("station_settings") is not None
+    await radio.fill(3)
+
+    await radio.restore_settings()
+
+    assert player.settings[-1] == ("all", "default", "any")
+    assert track_cache.get_setting("station_settings") is None
+    assert track_cache.get_setting("moods") == ["fun"]
+
+
+@pytest.mark.asyncio
+async def test_settings_that_could_not_be_put_back_are_tried_again_next_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    track_cache.put_setting(
+        "station_settings",
+        {"station": "user:onyourwave", "settings": ["all", "default", "any"]},
+    )
+    radio, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+
+    async def broken(*args: object) -> None:
+        raise ConnectionError("no network")
+
+    monkeypatch.setattr(player, "set_station_settings", broken)
+
+    await radio.restore_state()  # does not raise
+
+    assert track_cache.get_setting("station_settings") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_setting_does_not_stop_the_radio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    track_cache.put_setting("station_settings", {"station": "x"})  # no settings
+    track_cache.put_setting("moods", ["calm", "angry", 7])
+    track_cache.put_setting("genres", "house")
+    radio, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+
+    await radio.restore_state()
+
+    assert radio.allowed_moods == ("calm",)  # what makes sense of it
+    assert radio.genres_info()["selected"] == []
+    # The damaged one was given up on; applying the moods saved a good one.
+    assert track_cache.get_setting("station_settings") == {
+        "station": "user:onyourwave",
+        "settings": ["all", "default", "any"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_picked_genres_come_back_in_force_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    first.set_wanted_genres(["house", "rap"])
+
+    again, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
+    await again.restore_state()
+
+    info = again.genres_info()
+    assert info["selected"] == ["house", "rap"]
+    assert info["applied"] == ["house", "rap"]  # nothing was queued: in force
+
+
+@pytest.mark.asyncio
+async def test_restore_state_without_a_cache_does_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = make_radio(tmp_path, monkeypatch, FakePlayer([]), {})
+
+    await radio.restore_state()
+
+    assert radio.allowed_moods == ()
+
+
 @pytest.mark.asyncio
 async def test_allowed_moods_can_be_given_as_any_iterable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

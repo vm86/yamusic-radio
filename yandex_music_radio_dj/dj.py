@@ -102,6 +102,11 @@ CHUNK_SECONDS = 0.25
 PACING_LEAD_SECONDS = 2.0
 
 MP3_BITRATE = "192k"
+# A new listener gets this much of the latest audio at once, so that the
+# player has something to start on (browsers wait for ~1.5 s of audio before
+# they play) instead of waiting for it to arrive at the pace it plays.
+PREROLL_SECONDS = 3.0
+MP3_BYTES_PER_SECOND = int(MP3_BITRATE.rstrip("k")) * 1000 // 8
 ICY_METAINT = 16000
 ICY_NAME = "Yandex Music DJ"
 CLIENT_QUEUE_SIZE = 256
@@ -1342,13 +1347,84 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
             following_task.cancel()
 
 
+# MPEG-1 Layer III, which is what ffmpeg's libmp3lame makes of 44.1 kHz audio.
+MP3_BITRATES_KBPS = (
+    0,
+    32,
+    40,
+    48,
+    56,
+    64,
+    80,
+    96,
+    112,
+    128,
+    160,
+    192,
+    224,
+    256,
+    320,
+)
+MP3_SAMPLE_RATES = (44100, 48000, 32000)
+MP3_HEADER_SIZE = 4
+MP3_SYNC = 0xFF
+
+
+def mp3_frame_length(header: bytes) -> int:
+    """Return the length of the MP3 frame that starts like this, 0 if none.
+
+    Only MPEG-1 Layer III, the kind this radio makes.
+    """
+    if len(header) < MP3_HEADER_SIZE or header[0] != MP3_SYNC:
+        return 0
+    # Frame sync, MPEG-1, Layer III (the last bit is "no CRC" or "CRC").
+    if header[1] & 0xFE != 0xFA:  # noqa: PLR2004
+        return 0
+    index, rate, padding = (
+        header[2] >> 4,
+        (header[2] >> 2) & 3,
+        (header[2] >> 1) & 1,
+    )
+    # Bitrate index 0 is "free" and 15 is invalid.
+    if not 0 < index < len(MP3_BITRATES_KBPS) or rate >= len(MP3_SAMPLE_RATES):
+        return 0
+    return (
+        144 * MP3_BITRATES_KBPS[index] * 1000 // MP3_SAMPLE_RATES[rate]
+        + padding
+    )
+
+
+def mp3_start(data: bytes) -> int:
+    """Return where the first whole MP3 frame in data starts.
+
+    A listener can't start in the middle of a frame. A frame counts when the
+    next one follows it (the sync pattern may happen inside the audio).
+    Returns len(data) if there is none.
+    """
+    place = data.find(b"\xff")
+    while place != -1:
+        length = mp3_frame_length(data[place : place + MP3_HEADER_SIZE])
+        if length:
+            following = place + length
+            if following + MP3_HEADER_SIZE > len(data) or mp3_frame_length(
+                data[following : following + MP3_HEADER_SIZE]
+            ):
+                return place
+        place = data.find(b"\xff", place + 1)
+    return len(data)
+
+
 class Broadcaster:
     """Fans the encoded stream out to the connected listeners."""
 
-    def __init__(self) -> None:
+    def __init__(self, preroll_seconds: float = PREROLL_SECONDS) -> None:
         self.title = ""
         self._clients: set[Queue[bytes]] = set()
         self._first_listener = Event()
+        # The latest audio, for the listeners that join.
+        self._recent: deque[bytes] = deque()
+        self._recent_size = 0
+        self._preroll = round(preroll_seconds * MP3_BYTES_PER_SECOND)
 
     @property
     def has_listeners(self) -> bool:
@@ -1360,7 +1436,11 @@ class Broadcaster:
             await self._first_listener.wait()
 
     def subscribe(self) -> Queue[bytes]:
+        """Join the stream; the latest seconds of it come at once."""
         queue: Queue[bytes] = Queue(CLIENT_QUEUE_SIZE)
+        if self._recent:
+            data = b"".join(self._recent)[-self._preroll :]
+            queue.put_nowait(data[mp3_start(data) :])
         self._clients.add(queue)
         self._first_listener.set()
         return queue
@@ -1369,6 +1449,13 @@ class Broadcaster:
         self._clients.discard(queue)
 
     def publish(self, chunk: bytes) -> None:
+        self._recent.append(chunk)
+        self._recent_size += len(chunk)
+        while (
+            len(self._recent) > 1
+            and self._recent_size - len(self._recent[0]) >= self._preroll
+        ):
+            self._recent_size -= len(self._recent.popleft())
         for queue in self._clients:
             # A listener that can't keep up loses its oldest audio.
             with contextlib.suppress(QueueFull):

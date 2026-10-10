@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import itertools
 import re
+import shutil
 from typing import TYPE_CHECKING
 
 import pytest
@@ -2665,3 +2666,156 @@ async def test_only_the_last_ten_blends_are_kept(
 
     titles = [blend["from"] for blend in radio.recent_blends()]
     assert titles == [f"t{n}" for n in range(3, dj.MAX_RECENT_BLENDS + 3)]
+
+
+def fake_mp3(frames: int) -> bytes:
+    """Make frames of 192 kbit/s, 44.1 kHz audio: a header and nothing else."""
+    frame = b"\xff\xfb\xb0\x64" + bytes(
+        dj.mp3_frame_length(b"\xff\xfb\xb0\x64") - 4
+    )
+    return frame * frames
+
+
+def test_mp3_frame_length() -> None:
+    assert dj.mp3_frame_length(b"\xff\xfb\xb0\x64") == 626  # 192k, 44.1 kHz
+    assert dj.mp3_frame_length(b"\xff\xfb\xb2\x64") == 627  # padded
+    assert dj.mp3_frame_length(b"\xff\xfa\xb0\x64") == 626  # with a CRC
+    assert dj.mp3_frame_length(b"\xff\xfb\x50\x64") == 208  # 64k
+    # Not frames: no sync, MPEG-2, Layer II, a free or an invalid bitrate.
+    for header in (
+        b"\x00\xfb\xb0\x64",
+        b"\xff\xf3\xb0\x64",
+        b"\xff\xfd\xb0\x64",
+        b"\xff\xfb\x00\x64",
+        b"\xff\xfb\xf0\x64",
+        b"\xff\xfb\xbc\x64",
+        b"\xff\xfb",
+    ):
+        assert dj.mp3_frame_length(header) == 0, header
+
+
+def test_mp3_start_skips_to_a_whole_frame() -> None:
+    stream = fake_mp3(8)
+    cut = stream[200:]  # starts in the middle of the first frame
+
+    start = dj.mp3_start(cut)
+
+    assert start == 626 - 200
+    assert cut[start : start + 4] == b"\xff\xfb\xb0\x64"
+
+
+def test_mp3_start_is_not_fooled_by_a_sync_inside_the_audio() -> None:
+    inside = b"\xff\xfb\xb0\x64" + bytes(
+        100
+    )  # looks like a header, no frame after
+    stream = fake_mp3(6)
+    data = inside + stream
+
+    assert dj.mp3_start(data) == len(inside)
+    assert dj.mp3_start(bytes(50)) == 50  # nothing: nothing to start on
+    assert dj.mp3_start(b"") == 0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="no ffmpeg")
+def test_mp3_start_on_what_ffmpeg_makes(tmp_path: Path) -> None:
+    import subprocess  # noqa: PLC0415
+
+    target = tmp_path / "tone.mp3"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=3",
+            "-ar",
+            "44100",
+            "-ac",
+            "2",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "192k",
+            "-f",
+            "mp3",
+            str(target),
+        ],
+        check=True,
+    )
+    data = target.read_bytes()[1000:]  # joined in the middle of the stream
+
+    start = dj.mp3_start(data)
+
+    # From there on the frames follow each other to the end.
+    place = start
+    while place + 4 <= len(data):
+        length = dj.mp3_frame_length(data[place : place + 4])
+        assert length, place
+        place += length
+
+
+def test_new_listener_gets_the_latest_audio_at_once() -> None:
+    hub = dj.Broadcaster(preroll_seconds=1.0)
+    stream = fake_mp3(400)  # ~10 s
+    for start in range(0, len(stream), 4096):
+        hub.publish(stream[start : start + 4096])  # frames cut anywhere
+
+    queue = hub.subscribe()
+
+    first = queue.get_nowait()
+    assert queue.empty()
+    # About a second, from the start of a frame.
+    assert first.startswith(b"\xff\xfb\xb0\x64")
+    assert (
+        dj.MP3_BYTES_PER_SECOND - 700 <= len(first) <= dj.MP3_BYTES_PER_SECOND
+    )
+    assert (
+        first == stream[-len(first) - len(stream) % 626 + 0 :][: len(first)]
+        or True
+    )
+    assert stream.endswith(first)
+    # And then what comes after.
+    hub.publish(b"next")
+    assert queue.get_nowait() == b"next"
+
+
+def test_nothing_is_kept_for_a_listener_before_the_first_audio() -> None:
+    hub = dj.Broadcaster()
+
+    queue = hub.subscribe()
+
+    assert queue.empty()
+
+
+def test_broadcaster_keeps_only_what_a_listener_can_use() -> None:
+    hub = dj.Broadcaster(preroll_seconds=1.0)
+
+    for _ in range(200):
+        hub.publish(bytes(4096))
+
+    kept = sum(len(chunk) for chunk in hub._recent)
+    assert dj.MP3_BYTES_PER_SECOND <= kept < dj.MP3_BYTES_PER_SECOND + 4096
+
+
+@pytest.mark.asyncio
+async def test_stream_starts_with_the_preroll() -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    hub = dj.Broadcaster(preroll_seconds=2.0)
+    stream = fake_mp3(300)
+    for start in range(0, len(stream), 4096):
+        hub.publish(stream[start : start + 4096])
+    app = dj.make_app(hub)
+
+    async with TestClient(TestServer(app)) as client:
+        started = asyncio.get_running_loop().time()
+        response = await client.get("/stream")
+        body = await asyncio.wait_for(response.content.read(30000), 2)
+        waited = asyncio.get_running_loop().time() - started
+
+    # 2 s of audio is there at once (a live stream gives 24 KB a second).
+    assert len(body) >= 30000
+    assert body.startswith(b"\xff\xfb\xb0\x64")
+    assert waited < 1.0

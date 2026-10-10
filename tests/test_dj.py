@@ -162,8 +162,10 @@ def test_broadcaster_drops_oldest_for_slow_listener() -> None:
 class FakeRadio:
     """Hands out prepared decks of click tracks."""
 
-    def __init__(self, decks: list[dj.Deck]) -> None:
+    def __init__(self, decks: list[dj.Deck], *, skip: bool = False) -> None:
         self.decks = decks
+        # The next track was asked for, and was it taken.
+        self.skip_requested = skip
         self.asked: list[dj_mix.TrackAnalysis | None] = []
         self.events: list[tuple[str, str]] = []
         self.transitions: list[tuple[dj_mix.Transition, dj_mix.Effect]] = []
@@ -176,6 +178,10 @@ class FakeRadio:
 
     def is_stale(self, deck: dj.Deck) -> bool:
         return False
+
+    def skip_taken(self) -> None:
+        self.skip_requested = False
+        self.events.append(("skip", ""))
 
     def transition(
         self,
@@ -1941,7 +1947,8 @@ async def play_until_out_of_tracks(
 
     async def play() -> None:
         async for piece in dj.mix(radio):
-            pieces.append(piece)  # noqa: PERF401
+            pieces.append(piece)
+            await asyncio.sleep(0)  # the encoder lets the loop run, too
 
     with pytest.raises(RuntimeError, match="out of tracks"):
         await play()
@@ -2167,3 +2174,186 @@ def test_cache_keeps_the_effects_and_calls_older_rows_unknown(
     cache.close()
     assert stats["by_effect"] == {"unknown": 1, "echo": 1, "none": 1}
     assert stats["by_type"] == {"bass swap": 2, "crossfade": 1}
+
+
+def test_early_blend_starts_on_a_bar_line_after_the_lead() -> None:
+    first = dj_mix.analyze(click_track(120, 120, first_beat=0.3))
+    second = dj_mix.analyze(click_track(120, 120, first_beat=0.17))
+    position = 20 * SR + 1234  # somewhere in the middle of a bar
+
+    planned = dj_mix.plan_early(first, second, position, beat_matched=True)
+
+    assert planned is not None
+    start, following_start, length = planned
+    bar = 2.0  # four beats at 120 BPM
+    assert start >= position + dj_mix.EARLY_LEAD_SECONDS * SR
+    assert start < position + (dj_mix.EARLY_LEAD_SECONDS + bar) * SR
+    # A bar line of the outgoing grid, and the first beat of the incoming.
+    off_grid = (start / SR - 0.3 + bar / 2) % bar - bar / 2
+    assert off_grid == pytest.approx(0, abs=0.015)
+    assert beat_error_ms(following_start, 120, 0.17) < 15
+    assert length == pytest.approx(
+        dj_mix.BEATS_PER_BLEND * 0.5 * SR, abs=SR / 50
+    )
+
+
+def test_early_blend_without_a_shared_grid_starts_after_the_lead() -> None:
+    first = dj_mix.TrackAnalysis(0, 0, 0, 0, 100 * SR, -10)
+    second = dj_mix.TrackAnalysis(0, 0, 0, 3000, 100 * SR, -10)
+
+    planned = dj_mix.plan_early(first, second, 10 * SR, beat_matched=False)
+
+    assert planned is not None
+    start, following_start, length = planned
+    assert start == 10 * SR + dj_mix.EARLY_LEAD_SECONDS * SR
+    assert following_start == 3000
+    assert length == dj_mix.PLAIN_BLEND_SECONDS * SR
+
+
+def test_early_blend_is_let_go_when_there_is_no_room_left() -> None:
+    first = dj_mix.analyze(click_track(120, 60, first_beat=0.3))
+    second = dj_mix.analyze(click_track(120, 60, first_beat=0.17))
+
+    assert dj_mix.plan_early(first, second, 57 * SR, beat_matched=True) is None
+    assert (
+        dj_mix.plan_early(first, second, 30 * SR, beat_matched=True) is not None
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_next_track_can_not_be_asked_for_before_anything_plays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+
+    with pytest.raises(dj.SkipRefusedError, match="nothing is playing"):
+        radio.request_skip()
+    assert not radio.skip_requested
+
+
+@pytest.mark.asyncio
+async def test_skip_is_pending_until_a_blend_and_never_during_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(3)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+
+    radio.request_skip()
+    assert radio.skip_requested
+    assert radio.queue()["skip_pending"] is True
+    radio.request_skip()  # asking again changes nothing
+
+    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+    assert not radio.skip_requested  # the blend answers it
+    with pytest.raises(dj.SkipRefusedError, match="under way"):
+        radio.request_skip()
+
+    radio.started(second)
+    radio.finished(first)
+    radio.request_skip()  # the blend is over: the next track can be asked for
+    assert radio.queue()["skip_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_track_is_reported_to_the_station_as_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(3)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+    third = await radio.next_deck(second.analysis)
+
+    radio.request_skip()
+    radio.skip_taken()
+    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+    radio.started(second)
+    radio.finished(first)  # skipped
+    radio.transition(dj_mix.Transition.BASS_SWAP, second, third)
+    radio.started(third)
+    radio.finished(second)  # heard to the end
+    await asyncio.sleep(0)
+
+    kinds = [(track, kind) for track, kind, _ in player.feedback]
+    assert ("a", "skip") in kinds
+    assert ("a", "trackFinished") not in kinds
+    assert ("b", "trackFinished") in kinds
+    heard = next(
+        seconds for _, kind, seconds in player.feedback if kind == "skip"
+    )
+    assert 0 <= heard < 5  # how long it was heard, not its length
+
+
+@pytest.mark.asyncio
+async def test_rest_api_next_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, player, {})
+    await radio.fill(3)
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        nothing = await client.post("/api/next")
+        assert nothing.status == 409
+        assert "nothing is playing" in await nothing.text()
+
+        playing = await radio.next_deck(None)
+        radio.started(playing)
+        reply = await client.post("/api/next")
+        assert reply.status == 202
+        assert (await reply.json())["skip_pending"] is True
+        queue = await (await client.get("/api/queue")).json()
+        assert queue["skip_pending"] is True
+
+
+@pytest.mark.asyncio
+async def test_mix_blends_into_the_next_track_when_it_is_asked_for() -> None:
+    radio = FakeRadio(
+        [
+            deck("one", 120, 0.3, matched=False),
+            deck("two", 120, 0.17, matched=True),
+        ],
+        skip=True,
+    )
+
+    pieces = await play_until_out_of_tracks(radio)
+
+    assert ("skip", "") in radio.events
+    assert radio.events.index(("skip", "")) < radio.events.index(
+        ("transition", "one>two")
+    )
+    titles = [title for _, title in pieces]
+    assert [t for i, t in enumerate(titles) if t != titles[i - 1]] == [
+        "one",
+        "two",
+    ]
+    # The first track was left after a few seconds, not after ~50 s.
+    one = sum(len(pcm) for pcm, title in pieces if title == "one") / SR
+    assert one < 20
+    played = np.concatenate([pcm for pcm, _ in pieces])
+    assert np.isfinite(played).all()
+    assert np.abs(played).max() < 2.0
+    assert np.abs(np.diff(played[:, 0])).max() < 1.0  # no jump at the seam
+
+
+@pytest.mark.asyncio
+async def test_mix_goes_on_if_there_is_no_room_for_an_early_blend() -> None:
+    # The first track is so short that no blend fits after the lead.
+    short = click_track(120, 6, 0.3)
+    first = dj.Deck("one", short, dj_mix.analyze(short), beat_matched=False)
+    radio = FakeRadio([first, deck("two", 120, 0.17, matched=True)], skip=True)
+
+    await play_until_out_of_tracks(radio)
+
+    assert ("skip", "") not in radio.events
+    assert ("transition", "one>two") in radio.events  # the natural blend

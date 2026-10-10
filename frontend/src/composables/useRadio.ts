@@ -79,6 +79,24 @@ export function useRadio() {
     }
   }
 
+  // The blend starts on a good beat, not at once: the queue says when the
+  // request has been taken (skip_pending goes back to false).
+  async function nextTrack(): Promise<void> {
+    try {
+      takeQueue(await api.nextTrack());
+      toast("Следующий трек: переход начнётся на ближайшем сильном бите");
+    } catch (error) {
+      const reason = (error as Error).message;
+      toast(
+        reason.includes("under way")
+          ? "Сейчас уже идёт переход, подождите"
+          : reason.includes("nothing is playing")
+            ? "Пока ничего не играет"
+            : `Не удалось перейти к следующему треку: ${reason}`,
+      );
+    }
+  }
+
   async function refreshQueue(): Promise<void> {
     refreshing.value = true;
     try {
@@ -130,5 +148,6 @@ export function useRadio() {
     setMoods,
     setGenres,
     refreshQueue,
+    nextTrack,
   };
 }

@@ -34,6 +34,8 @@ export interface Queue {
   now: NowTrack | null;
   next: TrackInfo[];
   moods: MoodsInfo;
+  /** The next track was asked for and its blend has not begun. */
+  skip_pending: boolean;
 }
 
 export interface AuthInfo {
@@ -81,6 +83,7 @@ export const api = {
   genres: () => request<GenresInfo>("api/genres"),
   moods: () => request<MoodsInfo>("api/moods"),
   refreshQueue: () => request<Queue>("api/queue/refresh", { method: "POST" }),
+  nextTrack: () => request<Queue>("api/next", { method: "POST" }),
   setMoods: (moods: string[]) =>
     moods.length
       ? put<MoodsInfo>("api/moods", { moods })

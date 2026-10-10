@@ -58,6 +58,12 @@ GLIDE_DECIMATION = 4
 # What a piece has to have beyond the span it plays, for the last frames.
 GLIDE_MARGIN = GLIDE_WINDOW + GLIDE_TOLERANCE
 
+# A blend asked for at once (the skip button) starts no sooner than this
+# after the request, on the first bar line of the outgoing track after it.
+EARLY_LEAD_SECONDS = 2.0
+# Less room than this in either track and the request is let go.
+MIN_EARLY_BLEND_SECONDS = 4.0
+
 # Length of the stretch of a track the beat position is measured on.
 BEAT_WINDOW_SECONDS = 30
 
@@ -626,6 +632,12 @@ def _blend_beats(section: int | None, period: float) -> int:
     return min(max(beats, MIN_BLEND_BEATS), MAX_BLEND_BEATS)
 
 
+def _first_beat(track: TrackAnalysis) -> int:
+    """Return the first beat of the track after its silence (samples)."""
+    j = ceil((track.start - track.head_beat) / track.beat_period)
+    return max(round(track.head_beat + j * track.beat_period), 0)
+
+
 def plan_matched(
     current: TrackAnalysis, following: TrackAnalysis, speed: float = 1.0
 ) -> tuple[int, int, int] | None:
@@ -638,12 +650,7 @@ def plan_matched(
     """
     period = current.beat_period
     solo = round(MIN_SOLO_SECONDS * SAMPLE_RATE)
-
-    # The first beat of the incoming track after its silence.
-    j = ceil((following.start - following.head_beat) / following.beat_period)
-    following_start = max(
-        round(following.head_beat + j * following.beat_period), 0
-    )
+    following_start = _first_beat(following)
 
     section = section_length(current, following)
     beats = _blend_beats(section, period)
@@ -670,6 +677,50 @@ def plan_matched(
         int((following.end - following_start) / speed),
     )
     return current_start, following_start, length
+
+
+def plan_early(
+    current: TrackAnalysis,
+    following: TrackAnalysis,
+    position: int,
+    *,
+    beat_matched: bool,
+    speed: float = 1.0,
+) -> tuple[int, int, int] | None:
+    """Plan a blend that is asked for while the outgoing track is at position.
+
+    The blend starts on a bar line of the outgoing track, the first one at
+    least EARLY_LEAD_SECONDS ahead (the beat grid is taken from the end of the
+    track that is nearer), lasts as long as any blend without sections and
+    comes in on the first beat of the following track. Without a shared grid
+    it starts as soon as the lead allows. Returns (start in current, start in
+    following, length) like plan_blend, or None if the outgoing track has no
+    room left for it.
+    """
+    earliest = position + round(EARLY_LEAD_SECONDS * SAMPLE_RATE)
+    if beat_matched and current.bpm and following.bpm:
+        period = current.beat_period
+        anchor = (
+            current.head_beat
+            if position - current.head_beat < current.tail_beat - position
+            else current.tail_beat
+        )
+        bar = BEATS_PER_BAR * period
+        start = round(anchor + ceil((earliest - anchor) / bar) * bar)
+        following_start = _first_beat(following)
+        length = round(BEATS_PER_BLEND * period)
+    else:
+        start = earliest
+        following_start = following.start
+        length = round(PLAIN_BLEND_SECONDS * SAMPLE_RATE)
+    length = min(
+        length,
+        current.end - start,
+        int((following.end - following_start) / speed),
+    )
+    if length < MIN_EARLY_BLEND_SECONDS * SAMPLE_RATE:
+        return None
+    return start, following_start, length
 
 
 def plan_blend(

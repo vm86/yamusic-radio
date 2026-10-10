@@ -29,7 +29,10 @@ const player = usePlayer(radio.now);
         :elapsed="radio.elapsed.value"
         :playing="player.playing.value"
         :label="player.label.value"
+        :can-skip="Boolean(radio.now.value && radio.auth.value?.authorized)"
+        :skip-pending="radio.queue.value?.skip_pending ?? false"
         @toggle="player.toggle"
+        @skip="radio.nextTrack"
       />
       <MoodCard
         v-if="radio.moods.value"

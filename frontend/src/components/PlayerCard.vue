@@ -12,9 +12,12 @@ const props = defineProps<{
   elapsed: number;
   playing: boolean;
   label: string;
+  /** Can the next track be asked for, and was it, but not yet taken. */
+  canSkip: boolean;
+  skipPending: boolean;
 }>();
 const volume = defineModel<number>("volume", { required: true });
-defineEmits<{ toggle: [] }>();
+defineEmits<{ toggle: []; skip: [] }>();
 
 const title = computed(() => props.now?.title ?? "Ничего не играет");
 const artists = computed(() => {
@@ -62,6 +65,17 @@ const progress = computed(() => {
     <div class="controls">
       <button class="fab" type="button" :aria-label="label" @click="$emit('toggle')">
         <Icon :name="playing ? 'pause' : 'play'" />
+      </button>
+      <button
+        class="icon-button"
+        type="button"
+        :disabled="!canSkip || skipPending"
+        :aria-busy="skipPending"
+        :title="skipPending ? 'Ждём подходящий бит…' : 'Следующий трек'"
+        :aria-label="skipPending ? 'Ждём подходящий бит' : 'Следующий трек'"
+        @click="$emit('skip')"
+      >
+        <Icon name="next" :class="{ waiting: skipPending }" />
       </button>
       <label class="volume">
         <Icon name="vol" />
@@ -119,6 +133,9 @@ const progress = computed(() => {
   box-shadow: 0 1px 3px 1px var(--md-elevation-shadow);
 }
 .fab .icon { width: 32px; height: 32px; }
+.icon-button:disabled { opacity: 0.38; cursor: default; }
+.icon-button:disabled::after { display: none; }
+.waiting { animation: pulse var(--app-motion-pulse) var(--md-sys-motion-easing-standard) infinite; }
 .volume { flex: 1; display: flex; align-items: center; gap: 12px; color: var(--md-sys-color-on-surface-variant); min-width: 0; }
 
 /* M3 slider */

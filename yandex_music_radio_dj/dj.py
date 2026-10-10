@@ -122,6 +122,10 @@ def cover_template(track: ExtendTrack | None) -> str:
     return uri if uri.startswith("http") else f"https://{uri}"
 
 
+class SkipRefusedError(Exception):
+    """The next track can't be asked for now."""
+
+
 @dataclass(frozen=True, slots=True)
 class TrackInfo:
     """A track as the API shows it."""
@@ -292,6 +296,12 @@ class Radio:
         # the one already decoded to come next.
         self._now: Deck | None = None
         self._now_since = 0.0
+        # The next track was asked for (see request_skip); a transition is
+        # under way (from its count to the end of the track that is left);
+        # and how long the track left was heard, if it was skipped.
+        self._skip = False
+        self._blending = False
+        self._heard_seconds: float | None = None
         self._next: Deck | None = None
         self._before: deque[TrackInfo] = deque(maxlen=MAX_LISTED)
         # Only these station moods are played; empty is any.
@@ -503,7 +513,29 @@ class Radio:
             ),
             "next": [t.to_dict() for t in self.upcoming(after)],
             "moods": self.moods_info(),
+            "skip_pending": self._skip,
         }
+
+    @property
+    def skip_requested(self) -> bool:
+        return self._skip
+
+    def request_skip(self) -> None:
+        """Ask for the next track: the blend starts on the next good beat.
+
+        It is not at once: the next track has to be ready, and the blend
+        starts on a bar line of the track that plays, as smoothly as any.
+        """
+        if self._now is None:
+            raise SkipRefusedError("nothing is playing yet")
+        if self._blending:
+            raise SkipRefusedError("a transition is already under way")
+        self._skip = True
+
+    def skip_taken(self) -> None:
+        """Note that the track that plays is left early, at the user's wish."""
+        self._skip = False
+        self._heard_seconds = time.monotonic() - self._now_since
 
     def moods_info(self) -> dict[str, object]:
         return {
@@ -871,6 +903,9 @@ class Radio:
         effect: dj_mix.Effect = dj_mix.Effect.NONE,
     ) -> None:
         """Count a blend of the current deck into the following one."""
+        # Natural blends answer a request for the next track as well.
+        self._skip = False
+        self._blending = True
         relation = dj_mix.key_relation(
             current.analysis.key, following.analysis.key
         )
@@ -946,7 +981,12 @@ class Radio:
         self._send_feedback(deck, "trackStarted", 0.0)
 
     def finished(self, deck: Deck) -> None:
-        """Tell the station the track has been heard to the end."""
+        """Tell the station the track has been heard to the end, or skipped."""
+        self._blending = False
+        if self._heard_seconds is not None:
+            seconds, self._heard_seconds = self._heard_seconds, None
+            self._send_feedback(deck, "skip", seconds)
+            return
         seconds = (deck.analysis.end - deck.analysis.start) / SAMPLE_RATE
         self._send_feedback(deck, "trackFinished", seconds)
 
@@ -1015,6 +1055,43 @@ def _plan(current: Deck, following: Deck, position: int) -> BlendPlan:
     return BlendPlan(start, following_start, length, speed)
 
 
+def _early_plan(
+    radio: Radio,
+    current: Deck,
+    task: Task[Deck],
+    position: int,
+) -> BlendPlan | None:
+    """Plan the blend asked for by the skip button, if it can be made now.
+
+    It needs the next deck to be ready (the music goes on until it is) and
+    some room left in both tracks.
+    """
+    if task.cancelled() or not task.done() or task.exception() is not None:
+        return None
+    following = task.result()
+    if radio.is_stale(following):
+        return None
+    speed = following.speed if following.beat_matched else 1.0
+    planned = dj_mix.plan_early(
+        current.analysis,
+        following.analysis,
+        position,
+        beat_matched=following.beat_matched,
+        speed=speed,
+    )
+    if planned is None:
+        return None
+    start, following_start, length = planned
+    length = min(
+        length,
+        len(current.pcm) - start,
+        int((len(following.pcm) - following_start) / speed),
+    )
+    if length < dj_mix.MIN_EARLY_BLEND_SECONDS * SAMPLE_RATE:
+        return None
+    return BlendPlan(start, following_start, length, speed)
+
+
 async def _blend_pieces(
     current: Deck, following: Deck, plan: BlendPlan
 ) -> tuple[Pcm, Pcm, npt.NDArray[np.float64] | None]:
@@ -1064,6 +1141,78 @@ def _beat_period(
     return float(beat_grid[-1] - beat_grid[0]) / (len(beat_grid) - 1)
 
 
+def _followed_until(plan: BlendPlan, following: Deck) -> int:
+    """Return where in the following deck its own tempo goes on after a blend.
+
+    A blend that glided takes `speed` times as much of the following track
+    as of the outgoing one, however long the glide made the blend.
+    """
+    glided = (
+        following.beat_matched
+        and abs(plan.speed - 1) >= dj_mix.NEGLIGIBLE_TEMPO_SHIFT
+    )
+    return plan.following_start + round(
+        plan.length * (plan.speed if glided else 1.0)
+    )
+
+
+async def _transition(
+    radio: Radio,
+    current: Deck,
+    following: Deck,
+    plan: BlendPlan,
+    effects: float,
+) -> AsyncIterator[Piece]:
+    """Blend the following deck into the current one, piece by piece."""
+    outgoing, incoming, beat_grid = await _blend_pieces(
+        current, following, plan
+    )
+    beat_period = _beat_period(current, following, beat_grid)
+    kind = dj_mix.choose_transition(
+        current.analysis,
+        following.analysis,
+        beat_matched=following.beat_matched,
+        blend_seconds=len(outgoing) / SAMPLE_RATE,
+    )
+    used = dj_mix.applied_blend(kind, len(outgoing), beat_period, effects)
+    # The filtering takes a while, don't stall the event loop with it.
+    try:
+        blended = await asyncio.to_thread(
+            functools.partial(
+                dj_mix.blend,
+                kind,
+                outgoing,
+                incoming,
+                beat_period,
+                effects=effects,
+                beat_grid=beat_grid,
+            )
+        )
+    except Exception:
+        # A broken blend must not end the stream: fade instead.
+        log.exception("Blend failed (%s), crossfading", kind.value)
+        blended = dj_mix.crossfade(outgoing, incoming)
+        used = dj_mix.Applied(dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE)
+    log.info("Transition: %s, effect: %s", used.kind.value, used.effect.value)
+    # Count what was really made, not what was meant.
+    radio.transition(used.kind, current, following, used.effect)
+    radio.started(following)
+    half = len(blended) // 2
+    for piece in _pieces(blended[:half], current.title):
+        yield piece
+    for piece in _pieces(blended[half:], following.title):
+        yield piece
+    radio.finished(current)
+
+
+async def _ready_deck(radio: Radio, current: Deck, task: Task[Deck]) -> Deck:
+    """Wait for the next deck; choose again if the queue was rebuilt."""
+    following = await task
+    while radio.is_stale(following):
+        following = await radio.next_deck(current.analysis)
+    return following
+
+
 async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
     """Produce the endless mix: PCM pieces and the title of each."""
     current = await radio.next_deck(None)
@@ -1077,75 +1226,35 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
             following_task = create_task(radio.next_deck(current.analysis))
 
             # Everything up to the look-ahead point can be played without
-            # knowing the next track.
+            # knowing the next track, unless the next track is asked for.
             solo_end = max(position, current.analysis.end - lookahead)
+            early: BlendPlan | None = None
             for piece in _pieces(current.pcm[position:solo_end], current.title):
                 yield piece
-            position = solo_end
+                position += len(piece[0])
+                if radio.skip_requested:
+                    early = _early_plan(
+                        radio, current, following_task, position
+                    )
+                    if early is not None:
+                        break
+            if early is None:
+                position = solo_end
 
-            following = await following_task
-            while radio.is_stale(following):
-                # The queue was rebuilt: choose again.
-                following = await radio.next_deck(current.analysis)
-            plan = _plan(current, following, position)
+            following = await _ready_deck(radio, current, following_task)
+            if early is not None:
+                radio.skip_taken()
+            plan = early or _plan(current, following, position)
 
             for piece in _pieces(
                 current.pcm[position : plan.start], current.title
             ):
                 yield piece
-            outgoing, incoming, beat_grid = await _blend_pieces(
-                current, following, plan
-            )
-            beat_period = _beat_period(current, following, beat_grid)
-            kind = dj_mix.choose_transition(
-                current.analysis,
-                following.analysis,
-                beat_matched=following.beat_matched,
-                blend_seconds=len(outgoing) / SAMPLE_RATE,
-            )
-            used = dj_mix.applied_blend(
-                kind, len(outgoing), beat_period, effects
-            )
-            # The filtering takes a while, don't stall the event loop with it.
-            try:
-                blended = await asyncio.to_thread(
-                    functools.partial(
-                        dj_mix.blend,
-                        kind,
-                        outgoing,
-                        incoming,
-                        beat_period,
-                        effects=effects,
-                        beat_grid=beat_grid,
-                    )
-                )
-            except Exception:
-                # A broken blend must not end the stream: fade instead.
-                log.exception("Blend failed (%s), crossfading", kind.value)
-                blended = dj_mix.crossfade(outgoing, incoming)
-                used = dj_mix.Applied(
-                    dj_mix.Transition.CROSSFADE, dj_mix.Effect.NONE
-                )
-            log.info(
-                "Transition: %s, effect: %s", used.kind.value, used.effect.value
-            )
-            # Count what was really made, not what was meant.
-            radio.transition(used.kind, current, following, used.effect)
-            radio.started(following)
-            half = len(blended) // 2
-            for piece in _pieces(blended[:half], current.title):
+            async for piece in _transition(
+                radio, current, following, plan, effects
+            ):
                 yield piece
-            for piece in _pieces(blended[half:], following.title):
-                yield piece
-
-            radio.finished(current)
-            # What the incoming track gave is its own length, however long
-            # the glide made the blend.
-            position = plan.following_start + (
-                round(plan.length * plan.speed)
-                if beat_grid is not None
-                else len(outgoing)
-            )
+            position = _followed_until(plan, following)
             current = following
     finally:
         if following_task is not None:
@@ -1281,6 +1390,25 @@ def _add_stats_api(app: web.Application, radio: Radio) -> None:
     app.router.add_get("/api/stats/keys", key_pairs)
 
 
+def _add_queue_api(app: web.Application, radio: Radio) -> None:
+    """Add the endpoints that change what plays: rebuild the queue, skip."""
+
+    async def refresh_queue(_: web.Request) -> web.Response:
+        radio.refresh_queue()
+        return web.json_response(radio.queue())
+
+    async def next_track(_: web.Request) -> web.Response:
+        try:
+            radio.request_skip()
+        except SkipRefusedError as error:
+            raise web.HTTPConflict(text=str(error)) from None
+        # 202: the blend starts when there is a good beat for it.
+        return web.json_response(radio.queue(0, 1), status=202)
+
+    app.router.add_post("/api/queue/refresh", refresh_queue)
+    app.router.add_post("/api/next", next_track)
+
+
 def add_api(app: web.Application, radio: Radio) -> None:
     """Add the REST API to the app, under /api."""
 
@@ -1308,10 +1436,6 @@ def add_api(app: web.Application, radio: Radio) -> None:
         await radio.set_allowed_moods(moods)
         return web.json_response(radio.moods_info())
 
-    async def refresh_queue(_: web.Request) -> web.Response:
-        radio.refresh_queue()
-        return web.json_response(radio.queue())
-
     async def delete_moods(_: web.Request) -> web.Response:
         need_token()
         await radio.set_allowed_moods([])
@@ -1322,7 +1446,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
     app.router.add_get("/api/moods", get_moods)
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
-    app.router.add_post("/api/queue/refresh", refresh_queue)
+    _add_queue_api(app, radio)
     _add_genres_api(app, radio)
     _add_stats_api(app, radio)
 

@@ -89,6 +89,16 @@ MAX_LISTED = 15
 SETTING_MOODS = "moods"
 SETTING_GENRES = "genres"
 SETTING_STATION = "station_settings"
+# The genres of My Wave known so far: offered while the cache has none yet.
+KNOWN_GENRES = (
+    "dance", "pop", "house", "electronics", "rock", "country", "alternative",
+    "hardrock", "numetal", "alternativemetal", "classicmetal", "industrial",
+    "metal", "epicmetal", "lounge", "edmgenre", "gothicmetal", "indie",
+    "punk", "relax", "rnb", "estrada", "metalcoregenre", "rap", "soundtrack",
+    "trance", "tvseries", "disco", "dnb", "films", "folkmetal", "folkrock",
+    "kpop", "newwave", "posthardcore", "ruspop", "rusrock", "soul",
+    "stonerrock", "triphopgenre", "videogame",
+)  # fmt: skip
 # The blends kept to look at (see Radio.recent_blends).
 MAX_RECENT_BLENDS = 10
 # A beat grid of a blend needs at least this many points to give a period.
@@ -582,7 +592,7 @@ class Radio:
     def genres_info(self) -> dict[str, object]:
         """Genres to pick from, the ones picked and the ones in force."""
         known = self._cache.known_genres() if self._cache is not None else []
-        available = [name for name, _ in known]
+        available = [name for name, _ in known] or list(KNOWN_GENRES)
         for genre in (*self._wanted_genres, *self._allowed_genres):
             if genre not in available:
                 available.append(genre)

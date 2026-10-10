@@ -1544,6 +1544,19 @@ def test_genres_to_pick_are_the_known_ones(
     assert info["selected"] == ["techno"]
 
 
+def test_genres_are_preset_while_the_cache_has_none(
+    tmp_path: Path, track_cache: TrackCache
+) -> None:
+    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+    assert radio.genres_info()["available"] == list(dj.KNOWN_GENRES)
+
+    radio.set_wanted_genres(["techno"])
+    assert radio.genres_info()["available"][-1] == "techno"
+
+    track_cache.put_analysis("1", "mp3", "1", track_analysis(120), "rap")
+    assert radio.genres_info()["available"] == ["rap", "techno"]
+
+
 def test_genres_body_is_checked() -> None:
     assert dj._parse_genres({"genres": ["a", "b"]}) == ["a", "b"]
     for body in ({}, {"genres": "a"}, {"genres": [1]}, [], None):

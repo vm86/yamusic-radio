@@ -27,6 +27,8 @@ export interface GenresInfo {
   available: string[];
   selected: string[];
   applied: string[];
+  blocked: string[];
+  blocked_applied: string[];
 }
 
 export interface Queue {
@@ -92,4 +94,8 @@ export const api = {
     genres.length
       ? put<GenresInfo>("api/genres", { genres })
       : request<GenresInfo>("api/genres", { method: "DELETE" }),
+  setBlockedGenres: (genres: string[]) =>
+    genres.length
+      ? put<GenresInfo>("api/genres/blocked", { genres })
+      : request<GenresInfo>("api/genres/blocked", { method: "DELETE" }),
 };

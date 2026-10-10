@@ -114,6 +114,14 @@ export function useRadio() {
     }
   }
 
+  async function setBlockedGenres(list: string[]): Promise<void> {
+    try {
+      genres.value = await api.setBlockedGenres(list);
+    } catch (error) {
+      toast(`Не удалось запретить жанры: ${(error as Error).message}`);
+    }
+  }
+
   // The blend starts on a good beat, not at once: the queue says when the
   // request has been taken (skip_pending goes back to false).
   async function nextTrack(): Promise<void> {
@@ -190,6 +198,7 @@ export function useRadio() {
     refreshing,
     setMoods,
     setGenres,
+    setBlockedGenres,
     refreshQueue,
     nextTrack,
   };

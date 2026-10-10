@@ -4,11 +4,13 @@ import type { GenresInfo } from "../api";
 import ChipGroup from "./ChipGroup.vue";
 
 const props = defineProps<{ genres: GenresInfo }>();
-defineEmits<{ change: [genres: string[]] }>();
+defineEmits<{ change: [genres: string[]]; block: [genres: string[]] }>();
 
 // Picking genres changes nothing until the queue is rebuilt.
 const pending = computed(
-  () => JSON.stringify(props.genres.selected) !== JSON.stringify(props.genres.applied),
+  () =>
+    JSON.stringify(props.genres.selected) !== JSON.stringify(props.genres.applied) ||
+    JSON.stringify(props.genres.blocked) !== JSON.stringify(props.genres.blocked_applied),
 );
 const shown = computed(() => props.genres.available.length > 0 || props.genres.selected.length > 0);
 </script>
@@ -30,5 +32,22 @@ const shown = computed(() => props.genres.available.length > 0 || props.genres.s
       :selected="genres.selected"
       @change="$emit('change', $event)"
     />
+    <h3>Не играть</h3>
+    <ChipGroup
+      label="Не играть"
+      any-label="Нет"
+      :options="genres.available"
+      :selected="genres.blocked"
+      @change="$emit('block', $event)"
+    />
   </section>
 </template>
+
+<style scoped>
+h3 {
+  font: var(--md-sys-typescale-label-large);
+  letter-spacing: var(--md-sys-typescale-label-large-tracking);
+  color: var(--md-sys-color-on-surface-variant);
+  margin: 16px 0 8px;
+}
+</style>

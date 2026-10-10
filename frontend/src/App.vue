@@ -42,7 +42,7 @@ const player = usePlayer(radio.now);
         :disabled="!radio.auth.value?.authorized"
         @change="radio.setMoods"
       />
-      <GenreCard v-if="radio.genres.value" :genres="radio.genres.value" @change="radio.setGenres" />
+      <GenreCard v-if="radio.genres.value" :genres="radio.genres.value" @change="radio.setGenres" @block="radio.setBlockedGenres" />
       <StatsCard v-if="radio.stats.value" :stats="radio.stats.value" />
     </div>
 

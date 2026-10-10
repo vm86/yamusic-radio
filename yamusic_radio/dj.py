@@ -435,7 +435,8 @@ class Radio:
         The station's mood setting is kept on the account: it is changed
         for as long as the radio runs and put back when it stops.
         """
-        wanted = tuple(m for m in dj_mix.ALL_MOODS if m in set(moods))
+        chosen = set(moods)
+        wanted = tuple(m for m in dj_mix.ALL_MOODS if m in chosen)
         if wanted and self._saved_settings is None:
             await self.start_mood_arc()
         self._allowed_moods = wanted

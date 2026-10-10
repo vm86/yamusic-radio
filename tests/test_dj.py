@@ -2819,3 +2819,15 @@ async def test_stream_starts_with_the_preroll() -> None:
     assert len(body) >= 30000
     assert body.startswith(b"\xff\xfb\xb0\x64")
     assert waited < 1.0
+
+
+@pytest.mark.asyncio
+async def test_allowed_moods_can_be_given_as_any_iterable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = make_radio(tmp_path, monkeypatch, FakePlayer([]), {})
+
+    # A generator is read once: every mood in it counts, not only the first.
+    await radio.set_allowed_moods(m for m in ("fun", "calm", "angry"))
+
+    assert radio.allowed_moods == ("calm", "fun")

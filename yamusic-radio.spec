@@ -1,6 +1,7 @@
 Name:           yamusic-radio
-Version:        0.1.0
-Release:        %autorelease
+# CI passes the version of the tag: rpmbuild --define "pkg_version 1.2.3"
+Version:        %{?pkg_version}%{!?pkg_version:0.1.0}
+Release:        %{?pkg_release}%{!?pkg_release:%autorelease}
 Summary:        Endless beat-matched DJ radio from Yandex Music
 License:        LGPL-3.0-or-later
 

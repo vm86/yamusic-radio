@@ -1,0 +1,98 @@
+name: RPM
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: rpm-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # The program is frozen with PyInstaller for the machine it is built on:
+    # x86_64 Fedora, as the Dockerfile and the spec say.
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install the build tools
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git tar gzip rpm-build rpmlint python3-devel python3-pip \
+            systemd-rpm-macros rpmautospec gcc
+
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # v1.2.3 -> 1.2.3; anything else would not be a valid RPM version
+            if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then
+              echo "::error::The tag '$GITHUB_REF_NAME' must look like v1.2.3"
+              exit 1
+            fi
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "release=1" >> "$GITHUB_OUTPUT"
+          else
+            # a commit or a pull request: 0.0.0 before any release
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "release=0.git${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the RPM
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE: ${{ steps.version.outputs.release }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p ~/rpmbuild/SOURCES
+          git archive --prefix="yamusic-radio-$VERSION/" \
+            -o ~/rpmbuild/SOURCES/"yamusic-radio-$VERSION.tar.gz" HEAD
+          rpmbuild -bb yamusic-radio.spec \
+            --define "pkg_version $VERSION" --define "pkg_release $RELEASE"
+          mkdir -p dist && cp ~/rpmbuild/RPMS/x86_64/*.rpm dist/
+
+      - name: Check the RPM
+        run: |
+          rpm -qpi dist/*.rpm
+          rpm -qpl dist/*.rpm
+          dnf install -y --setopt=install_weak_deps=False dist/*.rpm ffmpeg-free
+          test "$(rpm -q --qf '%{VERSION}' yamusic-radio)" = "${{ steps.version.outputs.version }}"
+          yamusic-dj --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    # Only a tag publishes
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.rpm \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes --verify-tag

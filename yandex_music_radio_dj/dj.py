@@ -2,8 +2,9 @@
 
 Before it starts streaming, the radio downloads a pool of tracks from the
 station and analyzes their tempo. From then on it always picks the track
-that fits the one playing best (tempo, loudness), speeds it up or slows it
-down to the same tempo and blends it in over 16 beats. Meanwhile new tracks
+that fits the one playing best (tempo, loudness, key) and blends it in over
+a whole number of beats, the tempo of both tracks gliding from that of the
+one playing to that of the next. Meanwhile new tracks
 keep arriving in the background. The result is encoded to MP3 and served as
 an Icecast-style stream (with ICY titles) to any number of listeners.
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import shutil
 import tempfile
@@ -50,6 +52,8 @@ from yandex_music_radio_dj.request import retry_on_rate_limit
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
+    import numpy.typing as npt
+
     from yandex_music_radio_dj.cache import TrackCache
     from yandex_music_radio_dj.ya_player import ExtendTrack, YandexMusicPlayer
 
@@ -80,6 +84,8 @@ REPLENISH_RETRY_SECONDS = 120
 MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
 MAX_LISTED = 15
+# A beat grid of a blend needs at least this many points to give a period.
+MIN_BEATS_IN_GRID = 2
 # The page the radio shows at /.
 WEB_DIR = Path(__file__).parent / "web"
 WEB_PAGE = WEB_DIR / "index.html"
@@ -209,6 +215,9 @@ class Deck:
     beat_matched: bool
     track: ExtendTrack | None = None
     mood: str = ""
+    # The ratio of the tempo of the track before it to its own tempo (a
+    # beat-matched blend glides through it, see dj_mix.tempo_glide).
+    speed: float = 1.0
     # The downloaded track it was made from, kept until the deck is heard
     # so that the deck can go back to the pool (see Radio.refresh_queue).
     source: Candidate | None = None
@@ -216,11 +225,9 @@ class Deck:
     generation: int = 0
 
 
-async def decode_file(path: Path, speed: float = 1.0) -> Pcm:
-    """Decode to float32 44.1 kHz stereo, optionally sped up or slowed."""
+async def decode_file(path: Path) -> Pcm:
+    """Decode to float32 44.1 kHz stereo."""
     command = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path)]
-    if speed != 1.0:
-        command += ["-af", f"atempo={speed:.5f}"]
     command += [
         "-f",
         "f32le",
@@ -826,17 +833,18 @@ class Radio:
             if current is not None:
                 speed = dj_mix.transition_speed(current.bpm, candidate.analysis)
             try:
-                pcm = await decode_file(candidate.path, speed or 1.0)
+                pcm = await decode_file(candidate.path)
             except BaseException:
                 candidate.path.unlink(missing_ok=True)
                 raise
             deck = Deck(
                 candidate.title,
                 pcm,
-                dj_mix.stretched(candidate.analysis, speed or 1.0),
+                candidate.analysis,
                 beat_matched=bool(speed),
                 track=candidate.track,
                 mood=candidate.mood,
+                speed=speed or 1.0,
                 source=candidate,
                 generation=generation,
             )
@@ -849,7 +857,7 @@ class Radio:
                 candidate.title,
                 deck.analysis.bpm,
                 deck.analysis.camelot or "?",
-                ", beat-matched" if speed else "",
+                f", tempo glides by {abs(speed - 1):.1%}" if speed else "",
             )
             self._next = deck
             return deck
@@ -959,6 +967,95 @@ def _pieces(pcm: Pcm, title: str) -> list[Piece]:
     return [(pcm[i : i + size], title) for i in range(0, len(pcm), size)]
 
 
+@dataclass(frozen=True, slots=True)
+class BlendPlan:
+    """Where a blend takes its pieces from (samples), and at what pace."""
+
+    start: int  # in the outgoing track
+    following_start: int  # in the incoming track
+    length: int  # of the outgoing piece
+    speed: float  # incoming samples per outgoing sample
+
+
+def _plan(current: Deck, following: Deck, position: int) -> BlendPlan:
+    """Plan the blend of the following deck into the current one."""
+    planned = None
+    if following.beat_matched:
+        planned = dj_mix.plan_matched(
+            current.analysis, following.analysis, following.speed
+        )
+    # Without room for a blend on the beat the tracks are not matched.
+    following.beat_matched = planned is not None
+    if planned is None:
+        planned = dj_mix.plan_blend(
+            current.analysis, following.analysis, beat_matched=False
+        )
+    start, following_start, length = planned
+    speed = following.speed if following.beat_matched else 1.0
+    start = max(start, position)
+    length = max(
+        0,
+        min(
+            length,
+            current.analysis.end - start,
+            # The decoded track may be a few samples shorter than its
+            # analysis says (rounding).
+            len(current.pcm) - start,
+            int((len(following.pcm) - following_start) / speed),
+        ),
+    )
+    return BlendPlan(start, following_start, length, speed)
+
+
+async def _blend_pieces(
+    current: Deck, following: Deck, plan: BlendPlan
+) -> tuple[Pcm, Pcm, npt.NDArray[np.float64] | None]:
+    """Cut the two pieces that are blended, equally long.
+
+    If the tempos differ, the pieces glide from one to the other (and the
+    beats of the blend are returned); otherwise they are just cut out.
+    """
+    start, following_start = plan.start, plan.following_start
+    glides = (
+        following.beat_matched
+        and abs(plan.speed - 1) >= dj_mix.NEGLIGIBLE_TEMPO_SHIFT
+    )
+    if glides:
+        span = round(plan.length * plan.speed)
+        margin = dj_mix.GLIDE_MARGIN
+        try:
+            # Stretching takes a while too.
+            return await asyncio.to_thread(
+                dj_mix.tempo_glide,
+                current.pcm[start : start + plan.length + margin],
+                following.pcm[
+                    following_start : following_start + span + margin
+                ],
+                current.analysis.bpm,
+                plan.speed,
+                plan.length,
+            )
+        except Exception:
+            log.exception("The tempo glide failed, the beats will not match")
+            following.beat_matched = False
+    outgoing = current.pcm[start : start + plan.length]
+    incoming = following.pcm[following_start : following_start + plan.length]
+    # The pieces must be equally long, whatever the analysis says.
+    length = min(len(outgoing), len(incoming))
+    return outgoing[:length], incoming[:length], None
+
+
+def _beat_period(
+    current: Deck, following: Deck, beat_grid: npt.NDArray[np.float64] | None
+) -> float:
+    """Return the samples per beat of the blend, 0 if the beats don't match."""
+    if not following.beat_matched:
+        return 0.0
+    if beat_grid is None or len(beat_grid) < MIN_BEATS_IN_GRID:
+        return current.analysis.beat_period
+    return float(beat_grid[-1] - beat_grid[0]) / (len(beat_grid) - 1)
+
+
 async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
     """Produce the endless mix: PCM pieces and the title of each."""
     current = await radio.next_deck(None)
@@ -982,66 +1079,56 @@ async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
             while radio.is_stale(following):
                 # The queue was rebuilt: choose again.
                 following = await radio.next_deck(current.analysis)
-            blend_start, following_start, length = dj_mix.plan_blend(
-                current.analysis,
-                following.analysis,
-                beat_matched=following.beat_matched,
-            )
-            blend_start = max(blend_start, position)
-            length = max(
-                0,
-                min(
-                    length,
-                    current.analysis.end - blend_start,
-                    # The decoded track may be a few samples shorter than
-                    # its analysis says (tempo change, rounding).
-                    len(current.pcm) - blend_start,
-                    len(following.pcm) - following_start,
-                ),
-            )
+            plan = _plan(current, following, position)
 
             for piece in _pieces(
-                current.pcm[position:blend_start], current.title
+                current.pcm[position : plan.start], current.title
             ):
                 yield piece
+            outgoing, incoming, beat_grid = await _blend_pieces(
+                current, following, plan
+            )
+            beat_period = _beat_period(current, following, beat_grid)
             kind = dj_mix.choose_transition(
                 current.analysis,
                 following.analysis,
                 beat_matched=following.beat_matched,
+                blend_seconds=len(outgoing) / SAMPLE_RATE,
             )
             log.info("Transition: %s", kind.value)
             radio.transition(kind, current, following)
-            outgoing = current.pcm[blend_start : blend_start + length]
-            incoming = following.pcm[following_start : following_start + length]
-            # The pieces must be equally long, whatever the analysis says.
-            length = min(len(outgoing), len(incoming))
-            outgoing, incoming = outgoing[:length], incoming[:length]
-            beat_period = (
-                current.analysis.beat_period if following.beat_matched else 0
-            )
             # The filtering takes a while, don't stall the event loop with it.
             try:
                 blended = await asyncio.to_thread(
-                    dj_mix.blend,
-                    kind,
-                    outgoing,
-                    incoming,
-                    beat_period,
-                    effects=effects,
+                    functools.partial(
+                        dj_mix.blend,
+                        kind,
+                        outgoing,
+                        incoming,
+                        beat_period,
+                        effects=effects,
+                        beat_grid=beat_grid,
+                    )
                 )
             except Exception:
                 # A broken blend must not end the stream: fade instead.
                 log.exception("Blend failed (%s), crossfading", kind.value)
                 blended = dj_mix.crossfade(outgoing, incoming)
             radio.started(following)
-            half = length // 2
+            half = len(blended) // 2
             for piece in _pieces(blended[:half], current.title):
                 yield piece
             for piece in _pieces(blended[half:], following.title):
                 yield piece
 
             radio.finished(current)
-            position = following_start + length
+            # What the incoming track gave is its own length, however long
+            # the glide made the blend.
+            position = plan.following_start + (
+                round(plan.length * plan.speed)
+                if beat_grid is not None
+                else len(outgoing)
+            )
             current = following
     finally:
         if following_task is not None:

@@ -128,16 +128,6 @@ def test_plain_blend_when_tempo_is_unknown() -> None:
     assert in_start == 0
 
 
-def test_stretched_scales_positions() -> None:
-    base = dj_mix.TrackAnalysis(100, 1000, 3000, 500, 20000, -9)
-
-    fast = dj_mix.stretched(base, 1.25)
-
-    assert fast.bpm == 125
-    assert (fast.head_beat, fast.tail_beat) == (800, 2400)
-    assert (fast.start, fast.end) == (400, 16000)
-
-
 def test_crossfade_keeps_power() -> None:
     ones = np.ones((1000, 2), np.float32)
 
@@ -199,10 +189,17 @@ class FakeRadio:
 
 
 def deck(
-    title: str, bpm: float, first_beat: float, *, matched: bool
+    title: str,
+    bpm: float,
+    first_beat: float,
+    *,
+    matched: bool,
+    speed: float = 1.0,
 ) -> dj.Deck:
     pcm = click_track(bpm, 90, first_beat)
-    return dj.Deck(title, pcm, dj_mix.analyze(pcm), beat_matched=matched)
+    return dj.Deck(
+        title, pcm, dj_mix.analyze(pcm), beat_matched=matched, speed=speed
+    )
 
 
 @pytest.mark.asyncio
@@ -396,16 +393,6 @@ def test_unmatched_blend_length_is_clamped() -> None:
         assert length == seconds * SR, (intro, outro)
 
 
-def test_stretched_scales_sections() -> None:
-    base = dj_mix.TrackAnalysis(100, 0, 0, 0, 20000, -9, 1000, 18000)
-
-    fast = dj_mix.stretched(base, 2.0)
-
-    assert (fast.intro_end, fast.outro_start) == (500, 9000)
-    unknown = dj_mix.stretched(dj_mix.TrackAnalysis(100, 0, 0, 0, 9, -9), 2.0)
-    assert (unknown.intro_end, unknown.outro_start) == (-1, -1)
-
-
 def centroid(pcm: np.ndarray) -> float:
     """Return the spectral centroid in Hz."""
     spectrum = np.abs(np.fft.rfft(pcm[:, 0]))
@@ -545,7 +532,8 @@ def test_matched_transition_costs_less_than_a_clash() -> None:
     unknown, _ = dj_mix.transition_cost(current, track(0).analysis)
 
     assert matched < 1 < clash < unknown
-    assert playing.bpm == pytest.approx(120)  # it is played at our tempo
+    # It plays at its own tempo: the blend glides to it.
+    assert playing.bpm == pytest.approx(124)
 
 
 def test_cost_counts_sweeps_and_missing_sections() -> None:
@@ -1691,3 +1679,326 @@ async def test_queue_gives_the_cover_of_each_track(
         "b": "",
         "c": "",
     }
+
+
+def three_tones(
+    low: float, mid: float, high: float, seconds: float
+) -> np.ndarray:
+    """Make a stereo signal with a bass, a mid and a treble sine."""
+    t = np.arange(int(SR * seconds)) / SR
+    mono = sum(0.25 * np.sin(2 * np.pi * hz * t) for hz in (low, mid, high))
+    return np.stack([mono, mono], axis=1).astype(np.float32)
+
+
+def part(pcm: np.ndarray, start: float, end: float) -> np.ndarray:
+    return pcm[round(len(pcm) * start) : round(len(pcm) * end)]
+
+
+def test_eq_blend_swaps_the_mids_ahead_of_the_bass() -> None:
+    outgoing = three_tones(60, 1000, 6000, 16)
+    incoming = three_tones(80, 1400, 7000, 16)
+
+    blended = dj_mix.eq_blend(outgoing, incoming, beat_period=SR * 0.5)
+    swapped = dj_mix.bass_swap(outgoing, incoming, beat_period=SR * 0.5)
+
+    # At the start only the outgoing track, at the end only the incoming one.
+    start, end = part(blended, 0, 0.1), part(blended, 0.9, 1)
+    assert band_level(start, 60) > 0.2
+    assert band_level(start, 1400) < 0.02
+    assert band_level(end, 80) > 0.2
+    assert band_level(end, 1000) < 0.02
+    # Just before the middle the bass is still the outgoing one, but the
+    # mids have mostly changed hands: that is the difference to a bass swap.
+    before = part(blended, 0.42, 0.48)
+    assert band_level(before, 60) > 0.12
+    assert band_level(before, 80) < 0.02
+    assert band_level(before, 1400) > band_level(before, 1000)
+    assert (
+        band_level(before, 1000)
+        < band_level(part(swapped, 0.42, 0.48), 1000) / 2
+    )
+    # The highs cross over most of the blend, so they are both there.
+    middle = part(blended, 0.4, 0.6)
+    assert band_level(middle, 6000) > 0.1
+    assert band_level(middle, 7000) > 0.1
+    assert np.isfinite(blended).all()
+    assert np.abs(blended).max() < 1.0
+
+
+def test_eq_blend_keeps_the_loudness_of_the_two_tracks() -> None:
+    outgoing = three_tones(60, 1000, 6000, 16)
+    incoming = three_tones(80, 1400, 7000, 16)
+
+    blended = dj_mix.eq_blend(outgoing, incoming, beat_period=SR * 0.5)
+
+    rms = [
+        float(np.sqrt(np.mean(part(blended, a, a + 0.1) ** 2)))
+        for a in (0, 0.3, 0.5, 0.7, 0.9)
+    ]
+    reference = float(np.sqrt(np.mean(outgoing**2)))
+    assert all(0.55 * reference < level < 1.25 * reference for level in rms), (
+        rms
+    )
+
+
+def test_eq_blend_is_chosen_for_long_blends_and_clashing_keys() -> None:
+    quiet = dj_mix.TrackAnalysis(120, 0, 0, 0, SR, -14, key=0)  # 8B
+    same = dj_mix.TrackAnalysis(120, 0, 0, 0, SR, -13, key=0)
+    clash = dj_mix.TrackAnalysis(120, 0, 0, 0, SR, -13, key=6)  # F# major
+    loud = dj_mix.TrackAnalysis(120, 0, 0, 0, SR, -6, key=0)
+    long = dj_mix.EQ_BLEND_MIN_SECONDS
+
+    def choose(
+        following: dj_mix.TrackAnalysis, **kwargs: float
+    ) -> dj_mix.Transition:
+        return dj_mix.choose_transition(quiet, following, **kwargs)  # type: ignore[arg-type]
+
+    assert choose(same, beat_matched=True) is dj_mix.Transition.BASS_SWAP
+    assert (
+        choose(same, beat_matched=True, blend_seconds=long - 1)
+        is dj_mix.Transition.BASS_SWAP
+    )
+    assert (
+        choose(same, beat_matched=True, blend_seconds=long)
+        is dj_mix.Transition.EQ_BLEND
+    )
+    assert (
+        choose(clash, beat_matched=True, blend_seconds=4)
+        is dj_mix.Transition.EQ_BLEND
+    )
+    # Not on a shared grid, or too different in loudness: still a sweep.
+    assert (
+        choose(same, beat_matched=False, blend_seconds=long)
+        is dj_mix.Transition.FILTER_SWEEP
+    )
+    assert (
+        choose(loud, beat_matched=True, blend_seconds=long)
+        is dj_mix.Transition.FILTER_SWEEP
+    )
+
+
+def test_blend_dresses_an_eq_blend_like_a_bass_swap() -> None:
+    period = SR * 0.5
+    outgoing, incoming = tones(60, 2000, 8), tones(80, 3000, 8)
+    rng = np.random.default_rng
+
+    plain = dj_mix.blend(dj_mix.Transition.EQ_BLEND, outgoing, incoming, period)
+    dressed = dj_mix.blend(
+        dj_mix.Transition.EQ_BLEND,
+        outgoing,
+        incoming,
+        period,
+        effects=1.0,
+        rng=rng(0),
+    )
+
+    swap = round(dj_mix.swap_point(len(plain), period)[0])
+    before, after = slice(swap - SR // 2, swap), slice(swap, swap + SR // 2)
+    assert np.abs(dressed[before] - plain[before]).max() > 0  # the riser
+    assert np.abs(dressed[after] - plain[after]).max() > 0  # the boom
+
+
+def test_swap_point_follows_the_beat_grid_of_a_glide() -> None:
+    grid = np.array([0, 20000, 41000, 63000, 86000, 110000], dtype=np.float64)
+
+    point, ramp = dj_mix.swap_point(110000, 22000, grid)
+
+    assert point == 63000  # the beat nearest to the middle (55000)
+    assert ramp == (86000 - 63000) / 2
+    # The last beat has no length of its own: it falls back on the one before.
+    last, _ = dj_mix.swap_point(110000 * 10, 22000, grid)
+    assert last == 86000
+
+
+def onsets(pcm: np.ndarray, level: float = 0.3) -> np.ndarray:
+    """Return where the kicks of a click track start, in samples."""
+    loud = np.abs(pcm[:, 0])
+    rising = np.flatnonzero((loud[1:] > level) & (loud[:-1] <= level)) + 1
+    found: list[int] = []
+    for index in rising:
+        if not found or index - found[-1] > 0.15 * SR:
+            found.append(int(index))
+    return np.array(found)
+
+
+@pytest.mark.parametrize(
+    ("from_bpm", "to_bpm"), [(120, 128), (128, 120), (120, 110)]
+)
+def test_tempo_glide_keeps_the_beats_of_both_tracks_on_a_gliding_grid(
+    from_bpm: float, to_bpm: float
+) -> None:
+    first_out, first_in = 0.3, 0.17
+    outgoing = click_track(from_bpm, 90, first_out)
+    incoming = click_track(to_bpm, 90, first_in)
+    speed = dj_mix.transition_speed(from_bpm, dj_mix.analyze(incoming))
+    length = round(16 * SR * 60 / from_bpm)
+    start, following_start = round(first_out * SR), round(first_in * SR)
+    margin = dj_mix.GLIDE_MARGIN
+
+    out, inc, grid = dj_mix.tempo_glide(
+        outgoing[start : start + length + margin],
+        incoming[
+            following_start : following_start + round(length * speed) + margin
+        ],
+        from_bpm,
+        speed,
+        length,
+    )
+
+    assert len(out) == len(inc)
+    # The tempo grows by the same amount on each beat: the first beat is
+    # `from_bpm` long and the last one is almost `to_bpm` long.
+    beat = np.diff(grid)
+    assert beat[0] == pytest.approx(SR * 60 / from_bpm, rel=0.02)
+    assert beat[-1] == pytest.approx(SR * 60 / to_bpm, rel=0.02)
+    assert (np.diff(beat) * (to_bpm - from_bpm) < 0).all()  # monotonic
+    for piece in (out, inc):
+        found = onsets(piece)
+        assert len(found) >= len(grid) - 1
+        error_ms = np.abs(found[: len(grid) - 1] - grid[:-1]) / SR * 1000
+        assert error_ms.max() < 10, error_ms
+    # And the two pieces agree with each other: no flams.
+    both = min(len(onsets(out)), len(onsets(inc)))
+    flam_ms = np.abs(onsets(out)[:both] - onsets(inc)[:both]) / SR * 1000
+    assert flam_ms.max() < 12, flam_ms
+
+
+def test_tempo_glide_is_a_plain_cut_when_the_tempos_are_equal() -> None:
+    outgoing = click_track(120, 40, 0.3)
+    incoming = click_track(120, 40, 0.17)
+    length = round(16 * SR * 0.5)
+
+    out, inc, grid = dj_mix.tempo_glide(
+        outgoing[: length + 100], incoming[: length + 100], 120, 1.0, length
+    )
+
+    assert len(out) == len(inc) == length
+    assert (out == outgoing[:length]).all()
+    assert (inc == incoming[:length]).all()
+    assert len(grid) == 17
+    assert np.diff(grid) == pytest.approx(SR * 0.5)
+
+
+def test_tempo_glide_does_not_change_the_pitch() -> None:
+    t = np.arange(20 * SR) / SR
+    tone = (0.5 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+    stereo = np.stack([tone, tone], axis=1)
+    length = round(16 * SR * 60 / 120)
+
+    out, _, _ = dj_mix.tempo_glide(
+        stereo[: length + dj_mix.GLIDE_MARGIN],
+        stereo[: round(length * 0.9) + dj_mix.GLIDE_MARGIN],
+        120,
+        0.9,
+        length,
+    )
+
+    middle = out[len(out) // 4 : 3 * len(out) // 4]
+    peak = np.argmax(np.abs(np.fft.rfft(middle[:, 0]))) * SR / len(middle)
+    assert peak == pytest.approx(440, abs=5)
+
+
+def test_plan_matched_takes_more_or_less_of_the_incoming_track() -> None:
+    first = dj_mix.analyze(click_track(120, 120, first_beat=0.3))
+    second = dj_mix.analyze(click_track(128, 120, first_beat=0.17))
+    speed = dj_mix.transition_speed(120, second)
+
+    out_start, in_start, length = dj_mix.plan_matched(first, second, speed)
+
+    assert beat_error_ms(out_start, 120, 0.3) < 15
+    assert beat_error_ms(in_start, 128, 0.17) < 15
+    assert length == pytest.approx(16 * 0.5 * SR, abs=SR)
+    assert out_start + length == first.end
+    # The incoming track gives `speed` times as many samples as the outgoing.
+    assert in_start + length * speed <= second.end
+
+
+def test_tempo_ramp_reaches_tempos_the_constant_stretch_could_not() -> None:
+    # 120 -> 136 BPM is 13%: beyond the old 8% limit.
+    track = dj_mix.analyze(click_track(136, 60))
+
+    speed = dj_mix.transition_speed(120, track)
+
+    assert speed == pytest.approx(120 / 136, abs=1e-2)
+    assert dj_mix.transition_speed(100, track) == 0.0  # still too far
+
+
+async def play_until_out_of_tracks(
+    radio: FakeRadio,
+) -> list[tuple[np.ndarray, str]]:
+    """Mix until the fake radio has no more decks; return what was played."""
+    pieces: list[tuple[np.ndarray, str]] = []
+
+    async def play() -> None:
+        async for piece in dj.mix(radio):
+            pieces.append(piece)  # noqa: PERF401
+
+    with pytest.raises(RuntimeError, match="out of tracks"):
+        await play()
+    return pieces
+
+
+@pytest.mark.asyncio
+async def test_mix_glides_the_tempo_into_the_next_track() -> None:
+    first = deck("one", 120, 0.3, matched=False)
+    second = deck("two", 128, 0.17, matched=True, speed=120 / 128)
+    radio = FakeRadio([first, second])
+
+    pieces = await play_until_out_of_tracks(radio)
+
+    assert second.beat_matched  # there was room for a blend on the beat
+    assert ("transition", "one>two") in radio.events
+    titles = [title for _, title in pieces]
+    assert [t for i, t in enumerate(titles) if t != titles[i - 1]] == [
+        "one",
+        "two",
+    ]
+    played = np.concatenate([pcm for pcm, _ in pieces])
+    # The first track up to the blend, the glide (~7.7 s), and the second
+    # track from where the glide left it until the last 40 s.
+    assert 120 < len(played) / SR < 145
+    assert np.isfinite(played).all()
+    assert np.abs(played).max() < 2.0
+    # No jump at the seams: the loudest step between samples stays the same
+    # as in the tracks themselves.
+    assert np.abs(np.diff(played[:, 0])).max() < 1.0
+
+
+@pytest.mark.asyncio
+async def test_mix_does_not_stop_when_the_tempo_glide_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        raise ValueError("no glide today")
+
+    monkeypatch.setattr(dj_mix, "tempo_glide", broken)
+    first = deck("one", 120, 0.3, matched=False)
+    second = deck("two", 128, 0.17, matched=True, speed=120 / 128)
+    radio = FakeRadio([first, second])
+
+    pieces = await play_until_out_of_tracks(radio)
+
+    titles = [title for _, title in pieces]
+    assert [t for i, t in enumerate(titles) if t != titles[i - 1]] == [
+        "one",
+        "two",
+    ]
+    assert not second.beat_matched  # the tracks are no longer taken for matched
+
+
+@pytest.mark.asyncio
+async def test_next_deck_keeps_the_tempo_of_the_track_and_says_how_far_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, player, {"a": 120, "b": 128})
+    await radio.fill(2)
+
+    first = await radio.next_deck(None)
+    second = await radio.next_deck(first.analysis)
+
+    assert first.speed == 1.0
+    assert not first.beat_matched
+    assert second.analysis.bpm == 128  # no longer stretched to the first
+    assert second.beat_matched
+    assert second.speed == pytest.approx(120 / 128, abs=1e-3)

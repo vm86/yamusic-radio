@@ -2,17 +2,18 @@
 
 A track is reduced to a few numbers (tempo, position of the first beat,
 audible range, loudness). The next track is picked by tempo/loudness
-proximity, time-stretched to the tempo of the one playing, and blended in
-over a whole number of beats so that both beat grids coincide.
+proximity, and blended in over a whole number of beats so that both beat
+grids coincide: during the blend the tempo of both tracks glides from that
+of the one playing to the natural tempo of the next.
 
 Needs numpy.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
-from math import ceil, cos, floor, log2, log10, pi
+from math import ceil, cos, floor, log, log2, log10, pi
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -41,10 +42,21 @@ MIN_TEMPO_CONFIDENCE = 0.05
 # Samples quieter than this (about -40 dBFS) count as silence.
 SILENCE_LEVEL = 0.01
 
-# Largest playback speed change to match the tempo of the previous track.
-MAX_TEMPO_SHIFT = 0.08
-# Below this a speed change isn't worth a re-decode.
+# Largest tempo change a blend glides through to match the previous track.
+MAX_TEMPO_SHIFT = 0.15
+# Below this the tempos are taken for equal and nothing is stretched.
 NEGLIGIBLE_TEMPO_SHIFT = 0.002
+
+# The tempo glide stretches the blend pieces by WSOLA: frames of GLIDE_WINDOW
+# samples overlap by half, and each is moved up to GLIDE_TOLERANCE samples
+# to continue the previous one without a jump. The search for the best place
+# is done on a signal decimated by GLIDE_DECIMATION.
+GLIDE_WINDOW = 2048
+GLIDE_HOP = GLIDE_WINDOW // 2
+GLIDE_TOLERANCE = 128
+GLIDE_DECIMATION = 4
+# What a piece has to have beyond the span it plays, for the last frames.
+GLIDE_MARGIN = GLIDE_WINDOW + GLIDE_TOLERANCE
 
 # Length of the stretch of a track the beat position is measured on.
 BEAT_WINDOW_SECONDS = 30
@@ -72,6 +84,15 @@ MIN_SOLO_SECONDS = 10.0
 
 # Below the crossover the two tracks never play together (bass swap).
 CROSSOVER_HZ = 200.0
+# The three-band blend splits the sound at CROSSOVER_HZ and at this.
+EQ_HIGH_HZ = 2500.0
+# Where in the blend (0..1) the bands change hands. The mids go first and
+# the bass in the middle (see swap_point); the highs take most of the blend.
+EQ_MIDS_SWAP = (0.20, 0.50)
+EQ_HIGHS_SWAP = (0.15, 0.85)
+# Tracks that overlap this long get in each other's way with their mids;
+# the same goes for any blend of tracks whose keys clash.
+EQ_BLEND_MIN_SECONDS = 10.0
 # Cutoffs of the filtered copies a sweep moves between, low to high.
 SWEEP_CUTOFFS_HZ = (150, 250, 400, 650, 1000, 1600, 2600, 4200, 7000, 12000)
 # Share of the blend after which the sweeps are done.
@@ -579,26 +600,6 @@ def transition_speed(current_bpm: float, following: TrackAnalysis) -> float:
     return 1.0 if abs(speed - 1) < NEGLIGIBLE_TEMPO_SHIFT else speed
 
 
-def stretched(analysis: TrackAnalysis, speed: float) -> TrackAnalysis:
-    """Return the analysis of the track played `speed` times faster."""
-    if speed == 1.0:
-        return analysis
-    return replace(
-        analysis,
-        bpm=analysis.bpm * speed,
-        head_beat=analysis.head_beat / speed,
-        tail_beat=analysis.tail_beat / speed,
-        start=round(analysis.start / speed),
-        end=round(analysis.end / speed),
-        intro_end=round(analysis.intro_end / speed)
-        if analysis.intro_end >= 0
-        else -1,
-        outro_start=round(analysis.outro_start / speed)
-        if analysis.outro_start >= 0
-        else -1,
-    )
-
-
 def section_length(
     current: TrackAnalysis, following: TrackAnalysis
 ) -> int | None:
@@ -625,9 +626,16 @@ def _blend_beats(section: int | None, period: float) -> int:
     return min(max(beats, MIN_BLEND_BEATS), MAX_BLEND_BEATS)
 
 
-def _plan_matched(
-    current: TrackAnalysis, following: TrackAnalysis
+def plan_matched(
+    current: TrackAnalysis, following: TrackAnalysis, speed: float = 1.0
 ) -> tuple[int, int, int] | None:
+    """Plan a blend on the beat, or None if there is no room for one.
+
+    Returns (start in current, start in following, length), in samples of
+    the outgoing track. `following` is at its own tempo: the blend glides
+    to it, so it takes `speed` times as much of the following track as of
+    the outgoing one (the ratio of the tempos, see transition_speed).
+    """
     period = current.beat_period
     solo = round(MIN_SOLO_SECONDS * SAMPLE_RATE)
 
@@ -649,7 +657,7 @@ def _plan_matched(
         # Rounding up to whole bars mustn't reach into the cores.
         into_outgoing_core = current_start < current.outro_start - period / 2
         into_incoming_core = (
-            following_start + length > following.intro_end + period / 2
+            following_start + length * speed > following.intro_end + period / 2
         )
         if not (into_outgoing_core or into_incoming_core):
             break
@@ -657,7 +665,10 @@ def _plan_matched(
 
     if current_start < current.start + solo:
         return None
-    length = min(current.end - current_start, following.end - following_start)
+    length = min(
+        current.end - current_start,
+        int((following.end - following_start) / speed),
+    )
     return current_start, following_start, length
 
 
@@ -666,13 +677,14 @@ def plan_blend(
     following: TrackAnalysis,
     *,
     beat_matched: bool,
+    speed: float = 1.0,
 ) -> tuple[int, int, int]:
     """Where the blend starts in each track and how long it lasts.
 
     Returns (start in current, start in following, length), in samples.
     """
     if beat_matched and current.bpm and following.bpm:
-        planned = _plan_matched(current, following)
+        planned = plan_matched(current, following, speed)
         if planned is not None:
             return planned
 
@@ -703,6 +715,7 @@ def crossfade(outgoing: Pcm, incoming: Pcm) -> Pcm:
 class Transition(StrEnum):
     CROSSFADE = "crossfade"
     BASS_SWAP = "bass swap"
+    EQ_BLEND = "eq blend"
     FILTER_SWEEP = "filter sweep"
 
 
@@ -711,18 +724,24 @@ def choose_transition(
     following: TrackAnalysis,
     *,
     beat_matched: bool,
+    blend_seconds: float = 0.0,
 ) -> Transition:
     """Pick the kind of blend that suits the pair of tracks.
 
     Two tracks on the same beat grid can share the highs while the bass
-    is handed over. Without a shared grid (or with a big jump in
-    loudness) the beats would clash, so one track is filtered away while
-    the other is filtered in, which hides the mismatch.
+    is handed over. When they overlap for long, or their keys clash, the
+    mids are swapped too, ahead of the bass, so that two voices or two
+    leads are not heard together for long. Without a shared grid (or with
+    a big jump in loudness) the beats would clash, so one track is
+    filtered away while the other is filtered in, which hides the mismatch.
     """
     loudness_gap = abs(current.loudness_db - following.loudness_db)
-    if beat_matched and loudness_gap < SWEEP_LOUDNESS_GAP_DB:
-        return Transition.BASS_SWAP
-    return Transition.FILTER_SWEEP
+    if not beat_matched or loudness_gap >= SWEEP_LOUDNESS_GAP_DB:
+        return Transition.FILTER_SWEEP
+    relation = key_relation(current.key, following.key)
+    if blend_seconds >= EQ_BLEND_MIN_SECONDS or key_quality(relation) == "poor":
+        return Transition.EQ_BLEND
+    return Transition.BASS_SWAP
 
 
 def _lowpass(
@@ -743,19 +762,39 @@ def _spectrum(pcm: Pcm) -> tuple[Spectrum, int]:
     return np.fft.rfft(pcm, size, axis=0), size
 
 
-def swap_point(frames: int, beat_period: float) -> tuple[float, float]:
-    """Return where the bass changes hands and how long it takes."""
+def swap_point(
+    frames: int,
+    beat_period: float,
+    beat_grid: npt.NDArray[np.float64] | None = None,
+) -> tuple[float, float]:
+    """Return where the bass changes hands and how long it takes.
+
+    `beat_grid` holds the position of each beat of a blend whose tempo
+    glides, and the bass changes hands on the beat nearest to the middle.
+    """
+    if beat_grid is not None and len(beat_grid) > 1:
+        beat = int(np.argmin(np.abs(beat_grid - frames / 2)))
+        beat = min(beat, len(beat_grid) - 2)
+        return float(beat_grid[beat]), float(
+            beat_grid[beat + 1] - beat_grid[beat]
+        ) / 2
     if not beat_period:
         return frames / 2, SAMPLE_RATE / 4
     return round(frames / 2 / beat_period) * beat_period, beat_period / 2
 
 
-def bass_swap(outgoing: Pcm, incoming: Pcm, beat_period: float = 0) -> Pcm:
+def bass_swap(
+    outgoing: Pcm,
+    incoming: Pcm,
+    beat_period: float = 0,
+    swap: tuple[float, float] | None = None,
+) -> Pcm:
     """Blend the highs, hand the bass over in one go in the middle.
 
     Two basslines at once turn the low end to mud, so the outgoing bass
     stays until the swap point and the incoming one only starts there.
-    The swap is on a beat when the beat period is known.
+    The swap is on a beat when the beat period is known (or `swap` says
+    where, see swap_point).
     """
     frames = len(outgoing)
     out_spec, size = _spectrum(outgoing)
@@ -763,9 +802,7 @@ def bass_swap(outgoing: Pcm, incoming: Pcm, beat_period: float = 0) -> Pcm:
     out_low = _lowpass(out_spec, size, frames, CROSSOVER_HZ)
     in_low = _lowpass(in_spec, size, frames, CROSSOVER_HZ)
 
-    swap, ramp = swap_point(frames, beat_period)
-    handover = np.clip((np.arange(frames) - (swap - ramp)) / (2 * ramp), 0, 1)
-    low_angle = (handover * np.pi / 2).astype(np.float32)
+    low_angle = _handover(frames, swap or swap_point(frames, beat_period))
     high_angle = np.linspace(0.0, np.pi / 2, frames, dtype=np.float32)
 
     result: Pcm = (
@@ -773,6 +810,62 @@ def bass_swap(outgoing: Pcm, incoming: Pcm, beat_period: float = 0) -> Pcm:
         + in_low * np.sin(low_angle)[:, None]
         + (outgoing - out_low) * np.cos(high_angle)[:, None]
         + (incoming - in_low) * np.sin(high_angle)[:, None]
+    )
+    return result.astype(np.float32)
+
+
+def _handover(
+    frames: int, swap: tuple[float, float]
+) -> npt.NDArray[np.float32]:
+    """Angle of an equal-power fade that is done in 2 * ramp around `swap`."""
+    point, ramp = swap
+    progress = np.clip((np.arange(frames) - (point - ramp)) / (2 * ramp), 0, 1)
+    angle: npt.NDArray[np.float32] = (progress * np.pi / 2).astype(np.float32)
+    return angle
+
+
+def _fade_angle(
+    frames: int, window: tuple[float, float]
+) -> npt.NDArray[np.float32]:
+    """Angle of an equal-power fade over a part of the blend (0..1)."""
+    progress = np.linspace(0.0, 1.0, frames, dtype=np.float32)
+    done = np.clip((progress - window[0]) / (window[1] - window[0]), 0, 1)
+    angle: npt.NDArray[np.float32] = (done * np.pi / 2).astype(np.float32)
+    return angle
+
+
+def eq_blend(
+    outgoing: Pcm,
+    incoming: Pcm,
+    beat_period: float = 0,
+    swap: tuple[float, float] | None = None,
+) -> Pcm:
+    """Hand the bass, the mids and the highs over one band at a time.
+
+    Like a DJ with three EQ knobs: the incoming track comes in over the
+    outgoing bass, the mids change hands first (where voices and leads
+    live, and where two tracks get in each other's way), then the bass on
+    a beat in the middle, while the highs cross over most of the blend.
+    """
+    frames = len(outgoing)
+    out_spec, size = _spectrum(outgoing)
+    in_spec, _ = _spectrum(incoming)
+    out_low = _lowpass(out_spec, size, frames, CROSSOVER_HZ)
+    in_low = _lowpass(in_spec, size, frames, CROSSOVER_HZ)
+    out_body = _lowpass(out_spec, size, frames, EQ_HIGH_HZ)
+    in_body = _lowpass(in_spec, size, frames, EQ_HIGH_HZ)
+
+    low = _handover(frames, swap or swap_point(frames, beat_period))
+    mid = _fade_angle(frames, EQ_MIDS_SWAP)
+    high = _fade_angle(frames, EQ_HIGHS_SWAP)
+
+    result: Pcm = (
+        out_low * np.cos(low)[:, None]
+        + in_low * np.sin(low)[:, None]
+        + (out_body - out_low) * np.cos(mid)[:, None]
+        + (in_body - in_low) * np.sin(mid)[:, None]
+        + (outgoing - out_body) * np.cos(high)[:, None]
+        + (incoming - in_body) * np.sin(high)[:, None]
     )
     return result.astype(np.float32)
 
@@ -830,6 +923,133 @@ def filter_sweep(outgoing: Pcm, incoming: Pcm) -> Pcm:
     fade = progress * np.pi / 2
     blended = closing * np.cos(fade)[:, None] + opening * np.sin(fade)[:, None]
     return blended.astype(np.float32)
+
+
+def _best_start(
+    coarse: npt.NDArray[np.float32],
+    mono: npt.NDArray[np.float32],
+    reference: int,
+    nominal: int,
+) -> int:
+    """Find where to read the next frame so it follows the previous one.
+
+    The frame should start like the signal after the previous frame goes
+    on at `reference`. It is looked for around `nominal`: first on the
+    decimated signal, then at full resolution round the best place.
+    """
+    hop, tolerance, step = GLIDE_HOP, GLIDE_TOLERANCE, GLIDE_DECIMATION
+    size = hop // step
+    ref = coarse[reference // step : reference // step + size]
+    low = max((nominal - tolerance) // step, 0)
+    segment = coarse[low : low + 2 * tolerance // step + size]
+    if len(ref) < size or len(segment) <= size:
+        return nominal
+    corr = np.correlate(segment, ref, "valid")
+    energy = np.cumsum(np.concatenate([[0.0], np.square(segment)]))
+    score = corr / np.sqrt(energy[size:] - energy[:-size] + 1e-9)
+    near = (low + int(np.argmax(score))) * step
+
+    target = mono[reference : reference + hop]
+    best, best_score = nominal, -np.inf
+    for place in range(max(near - step, 0), near + step + 1):
+        candidate = mono[place : place + hop]
+        if len(candidate) < hop or len(target) < hop:
+            continue
+        fit = float(candidate @ target) / (
+            float(np.sqrt(candidate @ candidate)) + 1e-9
+        )
+        if fit > best_score:
+            best, best_score = place, fit
+    return best
+
+
+def _wsola(pcm: Pcm, positions: npt.NDArray[np.float64], frames: int) -> Pcm:
+    """Read `frames` samples from pcm at the pace `positions` gives.
+
+    Waveform similarity overlap-add: `positions[m]` is the place in pcm
+    that the m-th frame of the output (it starts at m * GLIDE_HOP) is read
+    from. Each frame is moved a little, to where it carries on from the
+    previous one without a jump, and the frames are overlapped. The pitch
+    stays, only the pace changes.
+    """
+    window, hop = GLIDE_WINDOW, GLIDE_HOP
+    pad = GLIDE_MARGIN
+    padded = np.concatenate(
+        [
+            np.zeros((pad, CHANNELS), np.float32),
+            pcm,
+            np.zeros((pad + window, CHANNELS), np.float32),
+        ]
+    )
+    mono = padded.mean(axis=1, dtype=np.float32)
+    step = GLIDE_DECIMATION
+    coarse = (
+        mono[: len(mono) // step * step]
+        .reshape(-1, step)
+        .mean(axis=1, dtype=np.float32)
+    )
+
+    rising = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(window) / window)
+    rising = rising.astype(np.float32)
+    # Nothing comes before the first frame, so it does not fade in.
+    first = rising.copy()
+    first[:hop] = 1.0
+
+    out = np.zeros(((len(positions) - 1) * hop + window, CHANNELS), np.float32)
+    last = len(padded) - window
+    start = 0
+    for m, position in enumerate(positions):
+        nominal = min(max(round(position) + pad, 0), last)
+        shape = rising
+        if m == 0:
+            start, shape = nominal, first
+        else:
+            start = min(
+                max(_best_start(coarse, mono, start + hop, nominal), 0), last
+            )
+        out[m * hop : m * hop + window] += (
+            padded[start : start + window] * (shape[:, None])
+        )
+    return out[:frames]
+
+
+def tempo_glide(
+    outgoing: Pcm, incoming: Pcm, bpm: float, speed: float, length: int
+) -> tuple[Pcm, Pcm, npt.NDArray[np.float64]]:
+    """Make the pieces of a blend, the tempo of which glides between tracks.
+
+    The tempo is `bpm` at the start (the outgoing track's own) and
+    `bpm / speed` at the end (the incoming track's own), growing by the
+    same amount on each beat. Both tracks follow it, so their beats stay
+    together all the way and nothing is stretched once the blend is over.
+
+    `outgoing` starts at the blend start in the outgoing track and holds
+    `length` samples (a whole number of beats, and GLIDE_MARGIN more if the
+    track has them), `incoming` starts where the blend starts in the
+    incoming track and holds `length * speed`. Returns the two pieces,
+    equally long, and where each of their beats is.
+    """
+    period = SAMPLE_RATE * 60.0 / bpm
+    beats = length / period
+    if abs(speed - 1) < NEGLIGIBLE_TEMPO_SHIFT:
+        frames = min(length, len(outgoing), len(incoming))
+        grid = np.arange(int(beats) + 1, dtype=np.float64) * period
+        return outgoing[:frames].copy(), incoming[:frames].copy(), grid
+
+    target = bpm / speed
+    # The tempo grows by `step` bpm a beat, which makes it bpm * exp(rate * t)
+    # in time (t in samples).
+    step = (target - bpm) / beats
+    rate = step / (60.0 * SAMPLE_RATE)
+    frames = int(log(target / bpm) / rate)
+    times = np.arange(ceil(frames / GLIDE_HOP) + 2) * GLIDE_HOP
+    pace = (np.exp(rate * times) - 1) / rate  # outgoing samples read by t
+    grid = np.log((bpm + step * np.arange(int(beats) + 1)) / bpm) / rate
+    return (
+        _wsola(outgoing, pace, frames),
+        _wsola(incoming, pace * speed, frames),
+        grid,
+    )
 
 
 def riser(frames: int, rng: np.random.Generator) -> Pcm:
@@ -934,13 +1154,15 @@ def blend(
     *,
     effects: float = 0.0,
     rng: np.random.Generator | None = None,
+    beat_grid: npt.NDArray[np.float64] | None = None,
 ) -> Pcm:
     """Blend two equally long pieces the given way.
 
     `effects` (0..1) dresses the transition up like in a club: with a
     shared beat grid a riser builds up to the drop and a boom lands on it;
     without one the outgoing track is echoed out instead, as the beats
-    can't be lined up.
+    can't be lined up. `beat_grid` says where the beats are when the
+    tempo glides over the blend (beat_period is then their mean distance).
     """
     frames = len(outgoing)
     if frames < MIN_FILTERED_BLEND_SECONDS * SAMPLE_RATE:
@@ -951,20 +1173,30 @@ def blend(
     if dressed and not beat_period:
         outgoing = echo_out(outgoing, round(frames * ECHO_CUT_AT), effects)
 
+    swap = swap_point(frames, beat_period, beat_grid) if beat_period else None
     if kind is Transition.BASS_SWAP:
-        blended = bass_swap(outgoing, incoming, beat_period)
+        blended = bass_swap(outgoing, incoming, beat_period, swap)
+    elif kind is Transition.EQ_BLEND:
+        blended = eq_blend(outgoing, incoming, beat_period, swap)
     elif kind is Transition.FILTER_SWEEP:
         blended = filter_sweep(outgoing, incoming)
     else:
         blended = crossfade(outgoing, incoming)
 
     if dressed and beat_period:
-        if kind is Transition.BASS_SWAP:
-            drop = round(swap_point(frames, beat_period)[0])
-        else:
+        period = beat_period
+        if swap is not None and kind in (
+            Transition.BASS_SWAP,
+            Transition.EQ_BLEND,
+        ):
+            drop = round(swap[0])
+        elif beat_grid is not None and len(beat_grid) > 1:
             # The last beat of the blend, so that the boom has room.
+            drop = int(beat_grid[-2])
+            period = float(beat_grid[-1] - beat_grid[-2])
+        else:
             drop = int((ceil(frames / beat_period) - 1) * beat_period)
-        blended = add_drop(blended, drop, beat_period, effects, rng)
+        blended = add_drop(blended, drop, period, effects, rng)
     return blended
 
 
@@ -1039,11 +1271,11 @@ def transition_cost(
     """Judge the transition the way the radio would actually make it.
 
     Returns the cost and the analysis of the following track as it would
-    be played (sped up or slowed down to match the tempo).
+    be played: at its own tempo, the blend glides to it (see tempo_glide).
     """
     speed = transition_speed(current.bpm, following)
     matched = bool(speed)
-    playing = stretched(following, speed or 1.0)
+    playing = following
 
     if matched:
         cost = MATCHED_TEMPO_COST * abs(log2(speed))

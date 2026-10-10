@@ -7,6 +7,7 @@ export const MOODS: Record<string, string> = {
 
 export const TRANSITIONS: Record<string, string> = {
   "bass swap": "Обмен басами",
+  "eq blend": "Трёхполосный EQ",
   "filter sweep": "Фильтр-свип",
   crossfade: "Кроссфейд",
 };

@@ -1,5 +1,3 @@
-%global appdir /opt/yamusic-dj
-
 Name:           yamusic-radio
 Version:        0.1.0
 Release:        %autorelease
@@ -9,20 +7,16 @@ License:        LGPL-3.0-or-later
 BuildArch:      x86_64
 BuildRequires:  python3-devel
 BuildRequires:  python3-pip
-BuildRequires:  python3-setuptools
-BuildRequires:  python3-setuptools_scm
 BuildRequires:  systemd-rpm-macros
 
-Requires:       python3 >= 3.12
-Requires:       python3-aiohttp
-Requires:       python3-numpy
 # MP3 output needs ffmpeg with libmp3lame (ffmpeg-free does not have it)
 Requires:       /usr/bin/ffmpeg
 
-# yandex-music отсутствует в Fedora — ставится в venv из PyPI
+# The program is one PyInstaller executable: it carries its own Python and
+# libraries, and PyInstaller's archive must not be stripped or recompiled.
+%global debug_package %{nil}
+%global __strip /bin/true
 %global __brp_python_bytecompile %{nil}
-%global __requires_exclude_from ^%{appdir}/.*$
-%global __provides_exclude_from ^%{appdir}/.*$
 
 %description
 DJ radio for Yandex Music: takes tracks from a station, beat-matches them
@@ -34,17 +28,29 @@ MP3 over HTTP.
 tar -xzf %{_sourcedir}/%{name}-%{version}.tar.gz
 
 %build
-# venv создаётся в %%install: buildroot чистится перед ним
-
-%install
 cd %{name}-%{version}
 export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
-%{python3} -m venv --system-site-packages %{buildroot}%{appdir}
-%{buildroot}%{appdir}/bin/pip install --no-cache-dir "yandex-music>=3.2.0"
-%{buildroot}%{appdir}/bin/pip install --no-cache-dir --no-deps .
-sed -i "s|%{buildroot}||g" %{buildroot}%{appdir}/bin/* %{buildroot}%{appdir}/pyvenv.cfg 2>/dev/null || true
-install -d %{buildroot}%{_bindir}
-ln -s %{appdir}/bin/yamusic-dj %{buildroot}%{_bindir}/yamusic-dj
+%{python3} -m venv %{_builddir}/venv
+%{_builddir}/venv/bin/pip install --no-cache-dir pyinstaller
+# Essentia finds the keys; it has wheels for x86_64 only. Without it the
+# program falls back to a simpler (and worse) key detection.
+if %{_builddir}/venv/bin/pip install --no-cache-dir ".[key]"; then
+    collect="--collect-all essentia"
+else
+    %{_builddir}/venv/bin/pip install --no-cache-dir .
+    collect=""
+fi
+printf 'from yamusic_radio.main import main\n\nmain()\n' > %{_builddir}/launcher.py
+%{_builddir}/venv/bin/pyinstaller --noconfirm --clean --onefile \
+    --name yamusic-dj \
+    --distpath %{_builddir}/dist --workpath %{_builddir}/work \
+    --specpath %{_builddir} \
+    --collect-submodules yandex_music --collect-data yamusic_radio \
+    $collect %{_builddir}/launcher.py
+
+%install
+install -Dpm0755 %{_builddir}/dist/yamusic-dj %{buildroot}%{_bindir}/yamusic-dj
+cd %{name}-%{version}
 install -Dpm0644 yamusic_radio/contrib/yamusic-dj.service \
     %{buildroot}%{_userunitdir}/yamusic-dj.service
 sed -i 's|%h/.local/bin/yamusic-dj|%{_bindir}/yamusic-dj|' \
@@ -52,7 +58,6 @@ sed -i 's|%h/.local/bin/yamusic-dj|%{_bindir}/yamusic-dj|' \
 
 %files
 %license %{name}-%{version}/LICENSE %{name}-%{version}/COPYING.LESSER
-%{appdir}
 %{_bindir}/yamusic-dj
 %{_userunitdir}/yamusic-dj.service
 

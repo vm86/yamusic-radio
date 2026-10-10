@@ -8,6 +8,8 @@ Type=notify
 ExecStart=%h/.local/bin/yamusic-dj
 RestartSec=10
 Restart=always
+# The PyInstaller bootloader forks: READY=1 comes from the child process
+NotifyAccess=all
 
 [Install]
 WantedBy=default.target

@@ -14,11 +14,11 @@ import sqlite3
 import time
 from pathlib import Path
 
-from yandex_music_radio_dj.dj_mix import TrackAnalysis, key_detector
+from yamusic_radio.dj_mix import TrackAnalysis, key_detector
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CACHE = Path.home() / ".cache/yandex-music-radio-dj.db"
+DEFAULT_CACHE = Path.home() / ".cache/yamusic-radio.db"
 # Rows kept; the ones not used for the longest time go first.
 MAX_ROWS = 20000
 

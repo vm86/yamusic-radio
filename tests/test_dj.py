@@ -15,11 +15,11 @@ from aiohttp import web
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from yandex_music_radio_dj.cache import TrackCache
+    from yamusic_radio.cache import TrackCache
 
 np = pytest.importorskip("numpy")
 
-from yandex_music_radio_dj import dj, dj_mix  # noqa: E402
+from yamusic_radio import dj, dj_mix  # noqa: E402
 
 SR = dj_mix.SAMPLE_RATE
 
@@ -2141,7 +2141,7 @@ def test_cache_keeps_the_effects_and_calls_older_rows_unknown(
 ) -> None:
     import sqlite3  # noqa: PLC0415
 
-    from yandex_music_radio_dj.cache import TrackCache  # noqa: PLC0415
+    from yamusic_radio.cache import TrackCache  # noqa: PLC0415
 
     path = tmp_path / "old.db"
     old = sqlite3.connect(path)

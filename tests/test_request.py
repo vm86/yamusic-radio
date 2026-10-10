@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from yandex_music_radio_dj.request import RateLimitError, retry_on_rate_limit
+from yamusic_radio.request import RateLimitError, retry_on_rate_limit
 
 
 class _Flaky:

@@ -1,6 +1,6 @@
 %global appdir /opt/yamusic-dj
 
-Name:           yandex-music-radio-dj
+Name:           yamusic-radio
 Version:        0.1.0
 Release:        %autorelease
 Summary:        Endless beat-matched DJ radio from Yandex Music
@@ -45,7 +45,7 @@ export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 sed -i "s|%{buildroot}||g" %{buildroot}%{appdir}/bin/* %{buildroot}%{appdir}/pyvenv.cfg 2>/dev/null || true
 install -d %{buildroot}%{_bindir}
 ln -s %{appdir}/bin/yamusic-dj %{buildroot}%{_bindir}/yamusic-dj
-install -Dpm0644 yandex_music_radio_dj/contrib/yamusic-dj.service \
+install -Dpm0644 yamusic_radio/contrib/yamusic-dj.service \
     %{buildroot}%{_userunitdir}/yamusic-dj.service
 sed -i 's|%h/.local/bin/yamusic-dj|%{_bindir}/yamusic-dj|' \
     %{buildroot}%{_userunitdir}/yamusic-dj.service

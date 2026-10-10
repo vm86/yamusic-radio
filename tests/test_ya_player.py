@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from yandex_music_radio_dj.ya_player import SETTINGS_MODE, YandexMusicPlayer
+from yamusic_radio.ya_player import SETTINGS_MODE, YandexMusicPlayer
 
 if TYPE_CHECKING:
     from pathlib import Path

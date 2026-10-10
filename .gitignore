@@ -50,7 +50,7 @@ ENV/
 # ruff
 .ruff_cache
 
-yandex_music_radio_dj/_version.py
+yamusic_radio/_version.py
 
 # coverage
 *.coverage

@@ -24,7 +24,7 @@ from yandex_music.utils.sign_request import (
     DEFAULT_SIGN_KEY,
 )
 
-from yandex_music_radio_dj.request import ClientRequest, retry_on_rate_limit
+from yamusic_radio.request import ClientRequest, retry_on_rate_limit
 
 if TYPE_CHECKING:
     from pathlib import Path

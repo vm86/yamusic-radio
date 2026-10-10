@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
     plugins: [vue()],
     // The build goes straight into the Python package: the radio serves it.
     build: {
-      outDir: "../yandex_music_radio_dj/web",
+      outDir: "../yamusic_radio/web",
       emptyOutDir: true,
     },
     server: {

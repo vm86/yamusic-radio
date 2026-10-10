@@ -12,15 +12,15 @@ from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout
 
-from yandex_music_radio_dj import dj
-from yandex_music_radio_dj.cache import DEFAULT_CACHE, TrackCache
-from yandex_music_radio_dj.ya_player import YandexMusicPlayer
+from yamusic_radio import dj
+from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
+from yamusic_radio.ya_player import YandexMusicPlayer
 
 faulthandler.enable()
 log = logging.getLogger(__name__)
 
-DEFAULT_CONFIG = Path.home() / ".config/yandex-music-radio-dj.json"
-DEFAULT_LOG = Path.home() / ".cache/yandex_music_radio_dj.log"
+DEFAULT_CONFIG = Path.home() / ".config/yamusic-radio.json"
+DEFAULT_LOG = Path.home() / ".cache/yamusic_radio.log"
 
 
 def init_logging(*, debug: bool, systemd_run: bool) -> None:

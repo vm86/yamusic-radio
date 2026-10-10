@@ -6,8 +6,8 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING
 
-from yandex_music_radio_dj.cache import MAX_ROWS, TrackCache
-from yandex_music_radio_dj.dj_mix import TrackAnalysis, key_detector
+from yamusic_radio.cache import MAX_ROWS, TrackCache
+from yamusic_radio.dj_mix import TrackAnalysis, key_detector
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -70,7 +70,7 @@ def test_prune_drops_least_recently_used(
     track_cache: TrackCache, monkeypatch: object
 ) -> None:
     cache = track_cache
-    import yandex_music_radio_dj.cache as module  # noqa: PLC0415
+    import yamusic_radio.cache as module  # noqa: PLC0415
 
     monkeypatch.setattr(module, "MAX_ROWS", 3)  # type: ignore[attr-defined]
     for i in range(5):
@@ -171,12 +171,12 @@ def test_analysis_without_a_key_is_made_again_by_essentia(
     cache.put_analysis("1", "mp3", "A - B", keyless)
 
     monkeypatch.setattr(
-        "yandex_music_radio_dj.cache.key_detector", lambda: "essentia"
+        "yamusic_radio.cache.key_detector", lambda: "essentia"
     )
     assert cache.get_analysis("1", "mp3") is None
 
     monkeypatch.setattr(
-        "yandex_music_radio_dj.cache.key_detector", lambda: "chroma profiles"
+        "yamusic_radio.cache.key_detector", lambda: "chroma profiles"
     )
     cache.put_analysis("1", "mp3", "A - B", keyless)
     assert cache.get_analysis("1", "mp3") == keyless

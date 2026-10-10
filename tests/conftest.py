@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from yandex_music_radio_dj.cache import TrackCache
+from yamusic_radio.cache import TrackCache
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

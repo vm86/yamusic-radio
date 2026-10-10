@@ -3,7 +3,7 @@ requires = ["setuptools >= 77.0", "setuptools-scm >= 8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yandex-music-radio-dj"
+name = "yamusic-radio"
 dynamic = ["version"]
 description = "Endless beat-matched DJ radio from Yandex Music stations"
 authors = [{ name = "Roman Nebaluev" }]
@@ -42,20 +42,20 @@ lint = ["mypy", "ruff"]
 key = ["essentia"]
 
 [project.scripts]
-yamusic-dj = "yandex_music_radio_dj.main:main"
+yamusic-dj = "yamusic_radio.main:main"
 
 [tool.setuptools]
 zip-safe = false
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["yandex_music_radio_dj", "yandex_music_radio_dj.*"]
+include = ["yamusic_radio", "yamusic_radio.*"]
 
 [tool.setuptools.package-data]
-"yandex_music_radio_dj" = ["contrib/*", "web/*", "web/assets/*"]
+"yamusic_radio" = ["contrib/*", "web/*", "web/assets/*"]
 
 [tool.setuptools_scm]
-version_file = "yandex_music_radio_dj/_version.py"
+version_file = "yamusic_radio/_version.py"
 
 [tool.pytest.ini_options]
 addopts = "--cov --cov-report term-missing:skip-covered -v -s"

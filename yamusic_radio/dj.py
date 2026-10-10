@@ -41,22 +41,22 @@ from typing import TYPE_CHECKING
 import numpy as np
 from aiohttp import ClientError, ClientSession, web
 
-from yandex_music_radio_dj import dj_mix
-from yandex_music_radio_dj.dj_mix import (
+from yamusic_radio import dj_mix
+from yamusic_radio.dj_mix import (
     CHANNELS,
     SAMPLE_RATE,
     Pcm,
     TrackAnalysis,
 )
-from yandex_music_radio_dj.request import retry_on_rate_limit
+from yamusic_radio.request import retry_on_rate_limit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
     import numpy.typing as npt
 
-    from yandex_music_radio_dj.cache import TrackCache
-    from yandex_music_radio_dj.ya_player import ExtendTrack, YandexMusicPlayer
+    from yamusic_radio.cache import TrackCache
+    from yamusic_radio.ya_player import ExtendTrack, YandexMusicPlayer
 
 log = logging.getLogger(__name__)
 

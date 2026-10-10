@@ -1,15 +1,13 @@
 [Unit]
 Description=Yandex Music DJ radio
-Wants=network-online.target
-After=network-online.target
 
 [Service]
 Type=notify
-ExecStart=%h/.local/bin/yamusic-dj
-RestartSec=10
-Restart=always
 # The PyInstaller bootloader forks: READY=1 comes from the child process
 NotifyAccess=all
+ExecStart=%h/.local/bin/yamusic-dj
+Restart=always
+RestartSec=10
 
 [Install]
 WantedBy=default.target

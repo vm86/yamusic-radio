@@ -142,7 +142,7 @@ stay on neighbouring keys (a fifth of them would by chance).
 ## Web page
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
-play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the FLAC stream (remembered) and volume, the current track with its progress, the previous and
+play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the FLAC stream (remembered) and volume, the current track with its progress and, under the cover, the spectrum of the mix (12 bars, in time with the sound), the previous and
 the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
 transition statistics, and the backends: which are on, the sign-in of each
 (the code of a device flow, or the fields it asks for). The theme is light,
@@ -163,6 +163,22 @@ npm run dev        # Vite with a proxy to the radio on 127.0.0.1:8000
 npm run dev:remote # the same with the API of another radio (RADIO_URL=https://radio.example.com)
 ```
 
+## Spectrum
+
+The radio mixes the sound itself, so it knows how loud each band is at every
+moment; a page cannot get that from the stream it plays (it needs CORS and
+it hears the sound ~3 s late). So the radio sends the bands over
+`GET /api/spectrum`, each with its position in the mix, and the page shows
+them when its player gets there.
+
+To tie the two together, the page gives its connection a name: it opens the
+stream as `/stream?l=NAME` (or `/stream.flac?l=NAME`) and the spectrum as
+`/api/spectrum?l=NAME`. The radio notes where in the mix that stream starts
+(a new listener gets the latest 3 s at once) and sends it first as the `start`
+event. A page of another origin can do the same: both URLs are sent with
+`Access-Control-Allow-Origin: *`. The analysis is in `yamusic_radio/spectrum.py`
+(`BANDS`, `LOW_HZ`, `HIGH_HZ`, `FLOOR_DB`).
+
 ## REST API
 
 Served next to the stream, no authentication.
@@ -179,6 +195,7 @@ Served next to the stream, no authentication.
 | `POST /api/next` | The next track now: it needs the next track to be ready, and the blend starts on the first bar line of the playing track at least 2 s ahead, as smooth as any other (16 beats; the tempo glides, bass swap / EQ blend / sweep). Answers 202 with the queue (`skip_pending: true` until the blend has begun), 409 if nothing plays yet or a transition is already under way. The station is told the track was skipped. |
 | `GET /api/next` | Where the next track button is: `skip_pending` (asked for, waiting for a good beat), `blending` (the blend is under way, until the old track is left behind) and `can_skip` (something plays and neither of the two). The page drives the button by this. |
 | `POST /api/pause`, `POST /api/resume` | Pause the mix for everyone, and go on. The time of the playing track does not run meanwhile. Answer `{"paused": true, "pause_reason": "user"}`, or `{"paused": false, "pause_reason": null}` after a resume. |
+| `GET /api/spectrum?l=NAME` | The spectrum of the mix as server-sent events (`text/event-stream`, CORS `*`): 12 bands (30 Hz to 16 kHz, log-spaced, a little tilted up towards the treble), about 30 times a second. First `event: start` with `{"position": SECONDS}`: where in the mix the player of the page starts (`null` if it did not connect within 5 s). Then each value is `data: {"t": 12.345, "b": [0..1, ...]}`: `t` is the position in the mix, `b` the levels of the bands (0 at -60 dBFS, 1 at full scale). `: keepalive` comments come every 15 s. Frames are sent a little ahead (the player hears the sound ~3 s after the mix made it): show each one when the player gets to `start + t`. |
 | `GET /api/transitions` | The last 10 blends, the newest last: `from`, `to`, `kind`, `effect`, `beat_matched`, `from_bpm`, `to_bpm`, `glide` (how far the tempo glided, `0.05` is 5% faster), `seconds`, `loudness_gap_db`, `key_relation`, `over_db` (how far above the limiter's ceiling the blend peaked before it was limited) and `at`. To look at a transition that did not sound right. |
 | `GET /api/auth` | `authorized` (a backend can give tracks), and while it cannot, what to do to sign in: the `url` to open and the `code` to enter there (both `null` once authorized, or until the service has given them) and `fields` (`{"name", "label", "secret"}`: values to type, `[]` for a device flow). `backends` lists every backend with the same keys plus `id`, `name`, `enabled` and `available` (signed in and not resting after failures). The server is up during authorization. |
 | `POST /api/auth` `{"backend": "id", "values": {"login": "..."}}` | Sign in with the values of the `fields` of the backend (without `backend`, of the radio's own). Answers like `GET /api/auth`; 400 if the backend turns them down. |

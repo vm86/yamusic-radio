@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 import pytest
 from aiohttp import ClientSession, ServerDisconnectedError
 from yandex_music.exceptions import NetworkError
 
 from yamusic_radio.request import (
     ClientRequest,
+    Cooldown,
     RateLimitError,
     retry_on_rate_limit,
     where,
@@ -40,6 +44,49 @@ async def test_retry_on_rate_limit_gives_up_after_all_delays() -> None:
         await retry_on_rate_limit(call, delays=(0.0, 0.0))
 
     assert call.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_requests_limited_together_wait_together(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cooldown = Cooldown()
+    sent: list[float] = []
+    loop = asyncio.get_running_loop()
+
+    async def call() -> str:
+        sent.append(loop.time())
+        await asyncio.sleep(0.01)  # in flight, with the others
+        if len(sent) <= 5:  # the first five are limited
+            raise RateLimitError("Concurrency limit exceeded")
+        return "ok"
+
+    with caplog.at_level(logging.WARNING):
+        results = await asyncio.gather(
+            *(
+                retry_on_rate_limit(call, delays=(0.1, 0.2), cooldown=cooldown)
+                for _ in range(5)
+            )
+        )
+
+    assert results == ["ok"] * 5
+    # Five requests were limited at once: one line, not five...
+    assert len([r for r in caplog.records if "Rate limited" in r.message]) == 1
+    # ...and they all went again only after the pause.
+    assert min(sent[5:]) - max(sent[:5]) >= 0.09
+
+
+@pytest.mark.asyncio
+async def test_the_cooldown_holds_back_a_request_that_comes_later() -> None:
+    cooldown = Cooldown()
+    assert cooldown.start(0.2)
+    assert not cooldown.start(0.5)  # one is on: this adds nothing
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await cooldown.wait()
+
+    assert loop.time() - started >= 0.15
 
 
 def test_where_drops_the_query() -> None:

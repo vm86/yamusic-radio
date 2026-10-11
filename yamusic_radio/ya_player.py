@@ -29,6 +29,7 @@ from yandex_music.utils.sign_request import (
 from yamusic_radio import backend
 from yamusic_radio.request import (
     ClientRequest,
+    Cooldown,
     retry_on_rate_limit,
     where,
 )
@@ -160,8 +161,9 @@ class YandexMusicPlayer(ClientAsync):
     }
 
     # Yandex answers 429 above a few simultaneous get-file-info requests;
-    # callers (batch loading, track creation, reads) share these slots.
-    DOWNLOAD_INFO_SLOTS: ClassVar[int] = 6
+    # callers (batch loading, track creation, reads) share these slots, and
+    # the pause after a 429.
+    DOWNLOAD_INFO_SLOTS: ClassVar[int] = 3
 
     def __init__(
         self,
@@ -176,6 +178,7 @@ class YandexMusicPlayer(ClientAsync):
         # The mood this process set the station to, None before that.
         self.__mood: str | None = None
         self.__info_slots = Semaphore(self.DOWNLOAD_INFO_SLOTS)
+        self.__info_cooldown = Cooldown()
         self.__session = client_session
 
         self.__settings_path = settings_path
@@ -435,7 +438,7 @@ class YandexMusicPlayer(ClientAsync):
                     params=params,
                 )
 
-        resp = await retry_on_rate_limit(request)
+        resp = await retry_on_rate_limit(request, cooldown=self.__info_cooldown)
         info = resp.get("downloadInfo") if isinstance(resp, dict) else None
         if not isinstance(info, dict):
             log.warning(

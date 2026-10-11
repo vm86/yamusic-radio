@@ -49,16 +49,48 @@ def where(url: str) -> str:
     return str(URL(url).with_query(None))
 
 
+class Cooldown:
+    """A pause the requests share: when Yandex limits one, all of them wait.
+
+    Each request backing off on its own sends the next burst at the same
+    moment, which is limited again, and every one of them logs it.
+    """
+
+    def __init__(self) -> None:
+        self._until = 0.0
+
+    async def wait(self) -> None:
+        left = self._until - asyncio.get_running_loop().time()
+        if left > 0:
+            await asyncio.sleep(left)
+
+    def start(self, delay: float) -> bool:
+        """Pause for delay, unless a pause is on already; say if it began.
+
+        A request that was limited while the pause was on was sent before
+        it: it adds nothing, and nothing is said of it.
+        """
+        now = asyncio.get_running_loop().time()
+        if self._until > now:
+            return False
+        self._until = now + delay
+        return True
+
+
 async def retry_on_rate_limit[T](
     call: Callable[[], Awaitable[T]],
     delays: tuple[float, ...] = RATE_LIMIT_DELAYS,
+    cooldown: Cooldown | None = None,
 ) -> T:
+    cooldown = cooldown or Cooldown()
     for delay in delays:
+        await cooldown.wait()
         try:
             return await call()
         except RateLimitError:
-            log.warning("Rate limited, retry in %.1fs", delay)
-            await asyncio.sleep(delay)
+            if cooldown.start(delay):
+                log.warning("Rate limited, requests wait %.1fs", delay)
+    await cooldown.wait()
     return await call()
 
 

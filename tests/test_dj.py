@@ -3498,3 +3498,34 @@ async def test_waiting_for_a_sign_in_ends_when_any_backend_is_signed_in() -> (
 
     await asyncio.wait_for(waiting, 1)
     assert multi.authorized
+
+
+@pytest.mark.asyncio
+async def test_the_radio_stays_up_and_retries_while_no_backend_gives_tracks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts: list[int] = []
+    pauses: list[float] = []
+
+    async def fill(self: dj.Radio, _size: int | None = None) -> None:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise BackendError("the service is down")
+        self.pool.append(
+            dj.Candidate("t", tmp_path / "t.mp3", track_analysis(120))
+        )
+
+    async def pause(seconds: float) -> None:
+        pauses.append(seconds)
+
+    async def play(*_: object) -> None:
+        return None
+
+    monkeypatch.setattr(dj.Radio, "fill", fill)
+    monkeypatch.setattr(dj, "sleep", pause)
+    monkeypatch.setattr(dj, "encode_forever", play)
+
+    await dj.serve(FakeBackend([]), host="127.0.0.1", port=0)
+
+    assert len(attempts) == 3
+    assert pauses == [dj.STARTUP_RETRY_SECONDS] * 2

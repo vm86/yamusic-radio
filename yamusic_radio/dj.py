@@ -82,6 +82,8 @@ EXTRA_TRACKS = 3
 MAX_EXTRA_TRACKS = 6
 # While the station gives nothing new, look again this often.
 REPLENISH_RETRY_SECONDS = 120
+# While the first tracks cannot be had, the radio asks again this often.
+STARTUP_RETRY_SECONDS = 30
 # Played tracks that can be repeated, oldest forgotten first.
 MAX_PLAYED_REMEMBERED = 500
 # The API lists at most this many tracks, before and after the current one.
@@ -1995,6 +1997,27 @@ async def encode_forever(
             return
 
 
+async def _first_tracks(radio: Radio) -> None:
+    """Fill the pool, and go on trying while no backend gives any tracks.
+
+    The radio must stay up, and tell on its page and in the log what is
+    wrong, rather than stop and be started again by whoever runs it.
+    """
+    while True:
+        try:
+            await radio.fill()
+        except Exception:
+            log.exception("Could not load the first tracks")
+        if radio.pool:
+            return
+        log.warning(
+            "No playable tracks yet, is a music backend reachable? "
+            "Retry in %d s",
+            STARTUP_RETRY_SECONDS,
+        )
+        await sleep(STARTUP_RETRY_SECONDS)
+
+
 async def serve(
     backend: MusicBackend,
     *,
@@ -2048,9 +2071,7 @@ async def serve(
             log.info(
                 "Preparing %d tracks from %s...", pool_size, radio.station_id
             )
-            await radio.fill()
-            if not radio.pool:
-                raise RuntimeError("The station gave no playable tracks")
+            await _first_tracks(radio)
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
                 await encode_forever(radio, hub, EFFECT_LEVELS[effects])

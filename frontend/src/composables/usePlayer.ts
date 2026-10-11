@@ -13,6 +13,15 @@ export const STREAM_PATHS: Record<StreamFormat, string> = {
   flac: "stream.flac",
 };
 
+/** A name for a listener: the radio is told it, to say where the page starts. */
+function newToken(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  }
+}
+
 function loadFormat(): StreamFormat {
   try {
     const saved = localStorage.getItem(FORMAT_KEY);
@@ -44,6 +53,8 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   const playing = ref(false);
   const volume = ref(loadVolume());
   const format = ref<StreamFormat>(loadFormat());
+  // Who this connection to the stream is (see the spectrum).
+  const token = ref("");
 
   const sync = () => (playing.value = !audio.paused);
   audio.addEventListener("playing", sync);
@@ -78,7 +89,8 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   );
 
   async function start(): Promise<void> {
-    audio.src = `${STREAM_PATHS[format.value]}?${Date.now()}`;
+    token.value = newToken();
+    audio.src = `${STREAM_PATHS[format.value]}?l=${token.value}&${Date.now()}`;
     try {
       await audio.play();
     } catch (error) {
@@ -135,6 +147,9 @@ export function usePlayer(now: Ref<NowTrack | null>) {
     playing,
     volume,
     format,
+    token,
+    /** Seconds of the stream that were played since it was connected. */
+    currentTime: () => audio.currentTime,
     toggle,
     label: computed(() => (playing.value ? t("player.stop") : t("player.play"))),
   };

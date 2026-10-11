@@ -9,6 +9,7 @@ class FakeAudio extends EventTarget {
   volume = 1;
   preload = "";
   crossOrigin: string | null = null;
+  currentTime = 0;
   private source: string | null = null;
   constructor() {
     super();
@@ -45,6 +46,27 @@ describe("the audio element", () => {
   it("asks for the stream with CORS, so that the sound can be analyzed", () => {
     usePlayer(ref(null));
     expect(FakeAudio.last.crossOrigin).toBe("anonymous");
+  });
+});
+
+describe("who is listening", () => {
+  it("names every connection to the stream, to say where it starts", async () => {
+    const player = usePlayer(ref(null));
+    expect(player.token.value).toBe("");
+
+    await player.toggle();
+    const first = player.token.value;
+    expect(first).not.toBe("");
+    expect(FakeAudio.last.getAttribute("src")).toContain(`?l=${first}&`);
+
+    player.format.value = "flac";
+    await nextTick();
+    await Promise.resolve();
+    expect(player.token.value).not.toBe(first);
+    expect(FakeAudio.last.getAttribute("src")).toContain(`?l=${player.token.value}&`);
+
+    FakeAudio.last.currentTime = 4.5;
+    expect(player.currentTime()).toBe(4.5);
   });
 });
 

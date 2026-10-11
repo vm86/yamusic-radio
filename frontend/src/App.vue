@@ -9,11 +9,13 @@ import SpriteSheet from "./components/SpriteSheet.vue";
 import StatsCard from "./components/StatsCard.vue";
 import TrackList from "./components/TrackList.vue";
 import { usePlayer } from "./composables/usePlayer";
+import { useSpectrum } from "./composables/useSpectrum";
 import { useRadio } from "./composables/useRadio";
 import { t } from "./i18n";
 
 const radio = useRadio();
 const player = usePlayer(radio.now);
+const spectrum = useSpectrum(player);
 </script>
 
 <template>
@@ -39,6 +41,7 @@ const player = usePlayer(radio.now);
         :label="player.label.value"
         :can-skip="Boolean(radio.queue.value?.can_skip && radio.auth.value?.authorized)"
         :blending="radio.queue.value?.blending ?? false"
+        :spectrum="spectrum.bands.value"
         :skip-pending="radio.queue.value?.skip_pending ?? false"
         @toggle="player.toggle"
         @skip="radio.nextTrack"

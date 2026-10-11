@@ -5,6 +5,7 @@ import { clock } from "../format";
 import { moodNames, t } from "../i18n";
 import type { StreamFormat } from "../composables/usePlayer";
 import FormatSwitch from "./FormatSwitch.vue";
+import SpectrumBars from "./SpectrumBars.vue";
 import Icon from "./Icon.vue";
 import KeyTag from "./KeyTag.vue";
 import VinylRecord from "./VinylRecord.vue";
@@ -19,6 +20,8 @@ const props = defineProps<{
   skipPending: boolean;
   /** The blend into the next track is under way. */
   blending?: boolean;
+  /** The bands of the sound the player plays now. */
+  spectrum?: number[];
 }>();
 const volume = defineModel<number>("volume", { required: true });
 const format = defineModel<StreamFormat>("format", { default: "mp3" });
@@ -52,6 +55,7 @@ const progress = computed(() => {
         <span v-if="skipPending" class="assist waiting-chip">{{ t("player.waiting") }}</span>
       </div>
     </div>
+    <SpectrumBars v-if="spectrum" :bands="spectrum" />
     <div class="progress">
       <div
         class="bar"

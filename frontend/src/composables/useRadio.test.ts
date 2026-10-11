@@ -15,6 +15,8 @@ const queueOf = (moods: MoodsInfo): Queue => ({
   next: [],
   moods,
   skip_pending: false,
+  blending: false,
+  can_skip: true,
   paused: false,
   pause_reason: null,
 });
@@ -63,6 +65,40 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
+});
+
+describe("the next track button", () => {
+  it("follows the radio every second while the track waits for a beat or blends", async () => {
+    const state = (skip_pending: boolean, blending: boolean): Queue => ({
+      ...queueOf(moodsOf([])),
+      skip_pending,
+      blending,
+      can_skip: !skip_pending && !blending,
+    });
+    api.queue.mockResolvedValue(state(false, false));
+    const { radio, wrapper } = setup();
+    await settle();
+    expect(api.queue).toHaveBeenCalledTimes(1);
+
+    api.nextTrack.mockResolvedValue(state(true, false));
+    api.queue.mockResolvedValue(state(true, false));
+    await radio.nextTrack();
+    expect(radio.queue.value?.can_skip).toBe(false);
+
+    api.queue.mockResolvedValue(state(false, true));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.queue).toHaveBeenCalledTimes(2);
+    expect(radio.queue.value?.skip_pending).toBe(false);
+    expect(radio.queue.value?.blending).toBe(true);
+
+    api.queue.mockResolvedValue(state(false, false));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(radio.queue.value?.can_skip).toBe(true);
+    // Free: only the usual poll (at 3 s) is left, not one a second.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(api.queue).toHaveBeenCalledTimes(4);
+    wrapper.unmount();
+  });
 });
 
 describe("the time of the track", () => {
@@ -240,6 +276,7 @@ describe("the next track button", () => {
       ...queueOf(moodsOf([])),
       next: [track("n1")],
       skip_pending: true,
+      can_skip: false,
     });
     const { radio, wrapper } = setup();
     await settle();

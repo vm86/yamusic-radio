@@ -38,6 +38,10 @@ export interface Queue {
   moods: MoodsInfo;
   /** The next track was asked for and its blend has not begun. */
   skip_pending: boolean;
+  /** The blend is under way: the next track can't be asked for again yet. */
+  blending: boolean;
+  /** A track plays, and the next one was not asked for, nor is being blended. */
+  can_skip: boolean;
   /** The mix stands: paused through the API, or nobody listens. */
   paused: boolean;
   pause_reason: "user" | "no_listeners" | null;

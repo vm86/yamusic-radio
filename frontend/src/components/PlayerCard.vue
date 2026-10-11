@@ -15,6 +15,8 @@ const props = defineProps<{
   /** Can the next track be asked for, and was it, but not yet taken. */
   canSkip: boolean;
   skipPending: boolean;
+  /** The blend into the next track is under way. */
+  blending?: boolean;
 }>();
 const volume = defineModel<number>("volume", { required: true });
 defineEmits<{ toggle: []; skip: [] }>();
@@ -74,7 +76,7 @@ const progress = computed(() => {
         type="button"
         :disabled="!canSkip || skipPending"
         :aria-busy="skipPending"
-        :title="skipPending ? t('player.waiting') : t('player.next')"
+        :title="skipPending ? t('player.waiting') : blending ? t('player.blending') : t('player.next')"
         :aria-label="skipPending ? t('player.waitingLabel') : t('player.next')"
         @click="$emit('skip')"
       >

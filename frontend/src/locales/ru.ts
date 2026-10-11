@@ -35,6 +35,7 @@ export const ru = {
   "player.position": "Позиция в треке",
   "player.positionText": "{elapsed} из {total}",
   "player.next": "Следующий трек",
+  "player.blending": "Идёт переход…",
   "player.volume": "Громкость",
   "player.play": "Слушать",
   "player.stop": "Остановить",

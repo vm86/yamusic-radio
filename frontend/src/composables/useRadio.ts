@@ -7,7 +7,7 @@ import {
   type Queue,
   type Stats,
 } from "../api";
-import { MOODS_DELAY_MS, POLL_MS } from "../constants";
+import { MOODS_DELAY_MS, POLL_MS, SKIP_POLL_MS } from "../constants";
 import { moodNames, t } from "../i18n";
 import { toast } from "./useToast";
 
@@ -37,9 +37,16 @@ export function useRadio() {
   let poll: ReturnType<typeof setInterval> | undefined;
   let clock: ReturnType<typeof setInterval> | undefined;
 
+  let skipTimer: ReturnType<typeof setTimeout> | undefined;
+
   function takeQueue(value: Queue): void {
     queue.value = value;
     fetchedAt.value = performance.now();
+    // The button waits for the radio: look at it more often meanwhile.
+    clearTimeout(skipTimer);
+    if (value.skip_pending || value.blending) {
+      skipTimer = setTimeout(() => void refresh(), SKIP_POLL_MS);
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -145,8 +152,10 @@ export function useRadio() {
     try {
       // Only the news is taken from the answer: that the request waits for a
       // beat. The lists stay as they are, or they would flicker.
-      const { skip_pending } = await api.nextTrack();
-      if (queue.value) queue.value = { ...queue.value, skip_pending };
+      const { skip_pending, blending, can_skip } = await api.nextTrack();
+      if (queue.value) {
+        takeQueue({ ...queue.value, skip_pending, blending, can_skip });
+      }
       toast(t("toast.skipAsked"));
     } catch (error) {
       const reason = (error as Error).message;
@@ -202,6 +211,7 @@ export function useRadio() {
     clearInterval(poll);
     clearInterval(clock);
     clearTimeout(moodTimer);
+    clearTimeout(skipTimer);
     document.removeEventListener("visibilitychange", onVisible);
   });
 

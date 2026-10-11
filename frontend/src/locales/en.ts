@@ -36,6 +36,7 @@ export const en: Messages = {
   "player.position": "Position in the track",
   "player.positionText": "{elapsed} of {total}",
   "player.next": "Next track",
+  "player.blending": "Blending…",
   "player.volume": "Volume",
   "player.play": "Listen",
   "player.stop": "Stop",

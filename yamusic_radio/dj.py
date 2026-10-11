@@ -671,8 +671,20 @@ class Radio:
             ),
             "next": [t.to_dict() for t in self.upcoming(after)],
             "moods": self.moods_info(),
-            "skip_pending": self._skip,
+            **self.skip_info(),
             **self.pause_info(),
+        }
+
+    def skip_info(self) -> dict[str, object]:
+        """Where the next track button is: asked for, under way, or free."""
+        return {
+            # Asked for, and waiting for a good beat to start the blend.
+            "skip_pending": self._skip,
+            # The blend is under way (until the old track is left behind).
+            "blending": self._blending,
+            "can_skip": (
+                self._now is not None and not self._skip and not self._blending
+            ),
         }
 
     def _heard(self) -> float:
@@ -1810,6 +1822,11 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
     app.router.add_post("/api/pause", pause)
     app.router.add_post("/api/resume", resume)
     app.router.add_post("/api/queue/refresh", refresh_queue)
+
+    async def next_status(_: web.Request) -> web.Response:
+        return web.json_response(radio.skip_info())
+
+    app.router.add_get("/api/next", next_status)
     app.router.add_post("/api/next", next_track)
 
 

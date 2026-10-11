@@ -2346,6 +2346,48 @@ async def test_skip_is_pending_until_a_blend_and_never_during_one(
 
 
 @pytest.mark.asyncio
+async def test_the_next_button_goes_through_its_three_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    await radio.fill(3)
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async def status(client: TestClient[Any, Any]) -> dict[str, bool]:
+        reply = await client.get("/api/next")
+        assert reply.status == 200
+        queue = await (await client.get("/api/queue")).json()
+        info = await reply.json()
+        # The queue says the same.
+        assert {k: queue[k] for k in info} == info
+        return cast("dict[str, bool]", info)
+
+    async with TestClient(TestServer(app)) as client:
+        nothing = {"skip_pending": False, "blending": False, "can_skip": False}
+        assert await status(client) == nothing  # nothing plays
+
+        first = await radio.next_deck(None)
+        radio.started(first)
+        second = await radio.next_deck(first.analysis)
+        free = {"skip_pending": False, "blending": False, "can_skip": True}
+        assert await status(client) == free
+
+        await client.post("/api/next")  # asked for: waits for a good beat
+        waiting = {"skip_pending": True, "blending": False, "can_skip": False}
+        assert await status(client) == waiting
+
+        radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+        radio.skip_taken()  # the blend has begun
+        blending = {"skip_pending": False, "blending": True, "can_skip": False}
+        assert await status(client) == blending
+
+        radio.started(second)
+        radio.finished(first)  # the blend is over
+        assert await status(client) == free
+
+
+@pytest.mark.asyncio
 async def test_a_skipped_track_is_reported_to_the_station_as_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

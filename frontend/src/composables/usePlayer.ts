@@ -21,6 +21,8 @@ function loadVolume(): number {
 export function usePlayer(now: Ref<NowTrack | null>) {
   const audio = new Audio();
   audio.preload = "none";
+  // So that the sound can be analyzed (Web Audio): the stream sends CORS headers.
+  audio.crossOrigin = "anonymous";
   const playing = ref(false);
   const volume = ref(loadVolume());
 

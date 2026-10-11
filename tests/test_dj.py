@@ -2904,6 +2904,20 @@ async def test_stream_starts_with_the_preroll() -> None:
     assert waited < 1.0
 
 
+@pytest.mark.asyncio
+async def test_stream_allows_other_origins_to_analyze_it() -> None:
+    hub = dj.Broadcaster()
+    hub.publish(fake_mp3(10))
+    app = dj.make_app(hub)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get(
+            "/stream", headers={"Origin": "http://example.test"}
+        )
+        assert response.headers["Access-Control-Allow-Origin"] == "*"
+        response.close()
+
+
 def persistent_radio(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

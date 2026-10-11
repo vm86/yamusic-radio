@@ -1956,6 +1956,9 @@ def make_app(
             "Content-Type": "audio/mpeg",
             "Cache-Control": "no-cache",
             "icy-name": ICY_NAME,
+            # A page of another origin may analyze the audio: an <audio>
+            # with crossorigin hands it to Web Audio only if this is sent.
+            "Access-Control-Allow-Origin": "*",
         }
         if with_titles:
             headers["icy-metaint"] = str(ICY_METAINT)

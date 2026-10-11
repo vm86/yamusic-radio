@@ -8,6 +8,7 @@ class FakeAudio extends EventTarget {
   paused = true;
   volume = 1;
   preload = "";
+  crossOrigin: string | null = null;
   private source: string | null = null;
   constructor() {
     super();
@@ -39,6 +40,13 @@ import { usePlayer } from "./usePlayer";
 
 beforeEach(() => vi.stubGlobal("Audio", FakeAudio));
 afterEach(() => vi.unstubAllGlobals());
+
+describe("the audio element", () => {
+  it("asks for the stream with CORS, so that the sound can be analyzed", () => {
+    usePlayer(ref(null));
+    expect(FakeAudio.last.crossOrigin).toBe("anonymous");
+  });
+});
 
 describe("the stream going away", () => {
   it("pauses the player when the stream fails", async () => {

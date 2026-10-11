@@ -380,7 +380,7 @@ def chroma(mono: Pcm) -> npt.NDArray[np.float64]:
     return total
 
 
-def _profile_key(mono: Pcm) -> tuple[int, float]:
+def profile_key(mono: Pcm) -> tuple[int, float]:
     """Return the key whose profile fits the chroma best, and how well."""
     profile = chroma(mono)
     if not profile.any():
@@ -397,7 +397,7 @@ def _profile_key(mono: Pcm) -> tuple[int, float]:
     return best, best_score
 
 
-def _essentia_key(mono: Pcm) -> int:
+def essentia_key(mono: Pcm) -> int:
     """Key by Essentia, with the profile made for electronic music.
 
     -1 when Essentia has no answer: it gave no key, or failed.
@@ -422,10 +422,10 @@ def estimate_key(mono: Pcm) -> int:
     tonal centre at all.
     """
     if _KEY_EXTRACTOR is not None:
-        found = _essentia_key(mono)
+        found = essentia_key(mono)
         if found >= 0:
             return found
-    key, confidence = _profile_key(mono)
+    key, confidence = profile_key(mono)
     return key if confidence >= MIN_KEY_CONFIDENCE else -1
 
 
@@ -986,7 +986,7 @@ def filter_sweep(outgoing: Pcm, incoming: Pcm) -> Pcm:
     return blended.astype(np.float32)
 
 
-def _attacks(mono: npt.NDArray[np.float32]) -> npt.NDArray[np.bool_]:
+def find_attacks(mono: npt.NDArray[np.float32]) -> npt.NDArray[np.bool_]:
     """Flag the blocks of GLIDE_BLOCK samples that start an attack."""
     block = GLIDE_BLOCK
     energy = np.square(mono[: len(mono) // block * block], dtype=np.float64)
@@ -1070,7 +1070,7 @@ def _wsola(pcm: Pcm, positions: npt.NDArray[np.float64], frames: int) -> Pcm:
     first = rising.copy()
     first[:hop] = 1.0
 
-    attacks = _attacks(mono)
+    attacks = find_attacks(mono)
     out = np.zeros(((len(positions) - 1) * hop + window, CHANNELS), np.float32)
     last = len(padded) - window
     start = 0

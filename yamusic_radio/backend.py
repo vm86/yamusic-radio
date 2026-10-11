@@ -17,6 +17,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+class BackendError(Exception):
+    """The backend could not do what it was asked: it or its service is down.
+
+    Backends raise it (and nothing else) for what may pass; MultiBackend
+    turns to the other backends when it sees it.
+    """
+
+
 class AuthError(Exception):
     """The backend turned the sign-in down (or has no such way to sign in)."""
 
@@ -98,6 +106,10 @@ class MusicBackend(Protocol):
         """The station to play when none is asked for."""
         ...
 
+    async def wait_authorized(self) -> None:
+        """Return once the backend is authorized (at once if it is)."""
+        ...
+
     def start_auth(self) -> None:
         """Begin authorizing, if that goes on by itself (a device flow).
 
@@ -106,7 +118,7 @@ class MusicBackend(Protocol):
         """
         ...
 
-    async def authorize(self, values: dict[str, str]) -> None:
+    async def authorize(self, values: dict[str, str], /) -> None:
         """Sign in with the values of `auth_prompt.fields`.
 
         Raises `AuthError` if they are wrong or the backend signs in
@@ -125,17 +137,19 @@ class MusicBackend(Protocol):
     async def station_batch(
         self,
         station_id: str,
+        /,
         *,
         exclude_track_ids: set[str],
     ) -> list[Track]:
         """Return the next tracks of the station, ready to be downloaded.
 
         Tracks of `exclude_track_ids` may be left out. May repeat tracks it
-        gave before when it has nothing else.
+        gave before when it has nothing else. Raises `BackendError` when the
+        service can't be reached.
         """
         ...
 
-    async def download(self, track: Track, path: Path) -> None:
+    async def download(self, track: Track, path: Path, /) -> None:
         """Write the audio of the track to `path`; raise if it can't."""
         ...
 
@@ -145,11 +159,14 @@ class MusicBackend(Protocol):
         feedback: Feedback,
         station_id: str,
         total_played_seconds: float,
+        /,
     ) -> None:
         """Tell the backend that the track was started, finished or skipped."""
         ...
 
-    async def station_settings(self, station_id: str) -> tuple[str, str, str]:
+    async def station_settings(
+        self, station_id: str, /
+    ) -> tuple[str, str, str]:
         """Return the station's (mood_energy, diversity, language)."""
         ...
 
@@ -159,6 +176,7 @@ class MusicBackend(Protocol):
         mood_energy: str,
         diversity: str,
         language: str,
+        /,
     ) -> None:
         """Change the station's settings (only if `supports_moods`)."""
         ...

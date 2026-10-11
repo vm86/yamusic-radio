@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aiohttp import ClientError, ClientSession
 from yandex_music.exceptions import (
@@ -20,11 +20,12 @@ from yandex_music.utils.request_async import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
 log = logging.getLogger(__name__)
 
 RATE_LIMIT_DELAYS = (0.5, 1.0, 2.0, 4.0)
+HTTP_BAD_GATEWAY = 502
 
 
 class RateLimitError(NetworkError):
@@ -56,38 +57,39 @@ async def retry_on_rate_limit[T](
 
 
 class ClientRequest(Request):
-    def __init__(
-        self,
-        client_session: ClientSession,
-        *args: Any,  # noqa: ANN401
-        **kwargs: Any,  # noqa: ANN401
-    ) -> None:
-        # Request takes its own settings (proxy, ...), just forward them.
-        super().__init__(*args, **kwargs)
+    def __init__(self, client_session: ClientSession) -> None:
+        super().__init__()
         self.__client_session = client_session
 
     async def _request_wrapper(
         self,
         method: str,
         url: str,
-        **kwargs: Any,  # noqa: ANN401
+        *,
+        params: Mapping[str, str | int] | None = None,
+        headers: Mapping[str, str] | None = None,
+        proxy: str | None = None,
+        data: object = None,
+        json: object = None,
+        **_unused: object,
     ) -> bytes:
-        if "headers" not in kwargs:
-            kwargs["headers"] = {}
-
-        kwargs["headers"]["User-Agent"] = USER_AGENT
-
+        # (The timeout and the rest of what the library passes are not
+        # used: the session has its own timeouts.)
         # api.music.yandex.net/rotor/station/*/feedback and .../settings3
         # only accept a JSON body; yandex_music sends form-data there
         # (data=dict), which makes the server reply 400 "condition is not met".
-        data = kwargs.get("data")
         if "/rotor/station/" in url and isinstance(data, dict):
-            kwargs["json"] = kwargs.pop("data")
+            data, json = None, data
 
-        kwargs.pop("timeout", None)
         try:
             async with self.__client_session.request(
-                method, url, **kwargs
+                method,
+                url,
+                params=params,
+                headers={**(headers or {}), "User-Agent": USER_AGENT},
+                proxy=proxy,
+                data=data,
+                json=json,
             ) as _resp:
                 resp = _resp
                 content = await resp.content.read()
@@ -109,7 +111,7 @@ class ClientRequest(Request):
 
         if error := STATUS_ERRORS.get(resp.status):
             raise error(message)
-        if resp.status == 502:  # noqa: PLR2004
+        if resp.status == HTTP_BAD_GATEWAY:
             raise NetworkError("Bad Gateway")
 
         raise NetworkError(f"{message} ({resp.status}): {content!r}")

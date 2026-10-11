@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import uuid
-from asyncio import CancelledError, Semaphore, Task, gather, sleep
+from asyncio import CancelledError, Event, Semaphore, Task, gather, sleep
 from asyncio.tasks import create_task
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -20,6 +20,7 @@ from yandex_music import (
     Track,
     YandexMusicObject,
 )
+from yandex_music.exceptions import YandexMusicError
 from yandex_music.utils import model
 from yandex_music.utils.sign_request import (
     DEFAULT_SIGN_KEY,
@@ -128,6 +129,8 @@ class DownloadInfo(YandexMusicObject):
         )
 
 
+# What the service may do wrong; the rest are our own mistakes.
+SERVICE_ERRORS = (YandexMusicError, ClientError, TimeoutError, RuntimeError)
 FEEDBACK_TYPES = {
     backend.Feedback.STARTED: "trackStarted",
     backend.Feedback.FINISHED: "trackFinished",
@@ -187,6 +190,9 @@ class YandexMusicPlayer(ClientAsync):
         )
 
         self.__init_task: Task[None] | None = None
+        self.__signed_in = Event()
+        if self.__settings["token"]:
+            self.__signed_in.set()
 
     def _on_device_code(self, code: DeviceCode) -> None:
         self.__auth_url = code.verification_url
@@ -201,6 +207,7 @@ class YandexMusicPlayer(ClientAsync):
         try:
             token = await self.device_auth(on_code=self._on_device_code)
             self.__settings["token"] = token.access_token
+            self.__signed_in.set()
             self.__auth_url = None
             self.__user_code = None
             self.save_settings()
@@ -234,7 +241,10 @@ class YandexMusicPlayer(ClientAsync):
             return
         self.__init_task = create_task(self._init_token(), name="init-token")
 
-    async def authorize(self, values: dict[str, str]) -> None:  # noqa: ARG002
+    async def wait_authorized(self) -> None:
+        await self.__signed_in.wait()
+
+    async def authorize(self, _values: dict[str, str], /) -> None:
         raise backend.AuthError("Yandex signs in by the code on its page")
 
     @property
@@ -280,10 +290,19 @@ class YandexMusicPlayer(ClientAsync):
     async def station_batch(
         self,
         station_id: str,
+        /,
         *,
         exclude_track_ids: set[str],
     ) -> list[backend.Track]:
         """One batch of station tracks, ready to be downloaded."""
+        try:
+            return await self._station_batch(station_id, exclude_track_ids)
+        except SERVICE_ERRORS as err:
+            raise backend.BackendError(str(err)) from err
+
+    async def _station_batch(
+        self, station_id: str, exclude_track_ids: set[str]
+    ) -> list[backend.Track]:
         station_tracks = await self.rotor_station_tracks(
             station=station_id,
             queue=self.__last_track,
@@ -405,7 +424,7 @@ class YandexMusicPlayer(ClientAsync):
         sign = base64.b64encode(hmac_sign.digest()).decode()[:-1]
         params["sign"] = sign
 
-        async def request() -> Any:  # noqa: ANN401
+        async def request() -> object:
             async with self.__info_slots:
                 return await self._request.get(
                     "https://api.music.yandex.net/get-file-info",
@@ -460,12 +479,18 @@ class YandexMusicPlayer(ClientAsync):
 
         return download_info.urls
 
-    async def download(self, track: backend.Track, path: Path) -> None:
+    async def download(self, track: backend.Track, path: Path, /) -> None:
+        try:
+            await self._download(track, path)
+        except SERVICE_ERRORS as err:
+            raise backend.BackendError(str(err)) from err
+
+    async def _download(self, track: backend.Track, path: Path) -> None:
         links = await self._get_download_links(
             track.track_id, track.codec, track.bitrate_in_kbps
         )
         if not links:
-            raise RuntimeError("no download links")
+            raise RuntimeError(f"no download links for {track.track_id}")
 
         async def request() -> None:
             with path.open("wb") as out:
@@ -474,10 +499,7 @@ class YandexMusicPlayer(ClientAsync):
                     async for chunk in resp.content.iter_chunked(1 << 16):
                         out.write(chunk)
 
-        try:
-            await retry_on_rate_limit(request)
-        except ClientError as err:
-            raise RuntimeError(f"download failed: {err!r}") from err
+        await retry_on_rate_limit(request)
 
     async def feedback_track(
         self,

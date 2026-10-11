@@ -12,7 +12,12 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture
-def track_cache(tmp_path: Path) -> Iterator[TrackCache]:
-    cache = TrackCache(tmp_path / "cache.db")
+def cache_path(tmp_path: Path) -> Path:
+    return tmp_path / "cache.db"
+
+
+@pytest.fixture
+def track_cache(cache_path: Path) -> Iterator[TrackCache]:
+    cache = TrackCache(cache_path)
     yield cache
     cache.close()

@@ -37,7 +37,7 @@ from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass
 from math import log10
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 from aiohttp import web
@@ -807,7 +807,7 @@ class Radio:
                 self._seen.update(t.track_id for t in fresh)
                 added = len(self._pool)
                 rejected = self._off_mood
-                await gather(*(self._prepare(t) for t in fresh))
+                await gather(*(self.prepare(t) for t in fresh))
                 if len(self._pool) == added and self._off_mood != rejected:
                     # Good tracks, but not of the moods wanted.
                     off_mood_batches += 1
@@ -852,7 +852,7 @@ class Radio:
                 continue
             await self._consumed.wait()
 
-    async def _prepare(self, track: Track) -> None:
+    async def prepare(self, track: Track) -> None:
         async with self._slots:
             title = f"{', '.join(track.artists)} - {track.title}"
             path = self._workdir / f"{track.track_id}.{track.codec}"
@@ -1087,27 +1087,28 @@ class Radio:
                 effect=effect.value,
             )
 
+    async def wait_feedback(self) -> None:
+        """Wait until the feedback that is on its way has been sent."""
+        await gather(*self._feedback_tasks)
+
     def recent_blends(self) -> list[dict[str, object]]:
         """Describe the last blends, the newest last."""
         return [report.to_dict() for report in self._recent]
 
     def transition_stats(self) -> dict[str, object]:
         """Describe the transitions of this run and of all runs."""
-        session = {
+        by_key = dict(self._transition_keys.most_common())
+        session: dict[str, object] = {
             "total": self._transitions.total(),
             "beat_matched": self._matched_transitions,
             "by_type": dict(self._transitions.most_common()),
             "by_effect": dict(self._effects.most_common()),
-            "by_key": dict(self._transition_keys.most_common()),
+            "by_key": by_key,
+            "by_quality": dj_mix.quality_counts(by_key),
         }
         all_time = (
             self._cache.transition_stats() if self._cache is not None else None
         )
-        for stats in (session, all_time):
-            if stats is not None:
-                stats["by_quality"] = dj_mix.quality_counts(
-                    stats["by_key"]  # type: ignore[arg-type]
-                )
         return {"session": session, "all_time": all_time}
 
     def key_pair_stats(self) -> dict[str, object]:
@@ -1214,8 +1215,34 @@ def _plan(current: Deck, following: Deck, position: int) -> BlendPlan:
     return BlendPlan(start, following_start, length, speed)
 
 
+class DeckSource(Protocol):
+    """What the mix needs of the radio: decks to play, and word of them."""
+
+    @property
+    def skip_requested(self) -> bool: ...
+
+    async def next_deck(self, current: TrackAnalysis | None, /) -> Deck: ...
+
+    def is_stale(self, deck: Deck, /) -> bool: ...
+
+    def skip_taken(self) -> None: ...
+
+    def transition(
+        self,
+        kind: dj_mix.Transition,
+        current: Deck,
+        following: Deck,
+        effect: dj_mix.Effect = ...,
+        report: BlendReport | None = ...,
+    ) -> None: ...
+
+    def started(self, deck: Deck, /) -> None: ...
+
+    def finished(self, deck: Deck, /) -> None: ...
+
+
 def _early_plan(
-    radio: Radio,
+    radio: DeckSource,
     current: Deck,
     task: Task[Deck],
     position: int,
@@ -1316,7 +1343,7 @@ def _followed_until(plan: BlendPlan, following: Deck) -> int:
 
 
 async def _transition(
-    radio: Radio,
+    radio: DeckSource,
     current: Deck,
     following: Deck,
     plan: BlendPlan,
@@ -1396,7 +1423,9 @@ async def _transition(
     radio.finished(current)
 
 
-async def _ready_deck(radio: Radio, current: Deck, task: Task[Deck]) -> Deck:
+async def _ready_deck(
+    radio: DeckSource, current: Deck, task: Task[Deck]
+) -> Deck:
     """Wait for the next deck; choose again if the queue was rebuilt."""
     following = await task
     while radio.is_stale(following):
@@ -1404,7 +1433,7 @@ async def _ready_deck(radio: Radio, current: Deck, task: Task[Deck]) -> Deck:
     return following
 
 
-async def mix(radio: Radio, effects: float = 0.0) -> AsyncIterator[Piece]:
+async def mix(radio: DeckSource, effects: float = 0.0) -> AsyncIterator[Piece]:
     """Produce the endless mix: PCM pieces and the title of each."""
     current = await radio.next_deck(None)
     radio.started(current)
@@ -1473,6 +1502,10 @@ MP3_BITRATES_KBPS = (
 MP3_SAMPLE_RATES = (44100, 48000, 32000)
 MP3_HEADER_SIZE = 4
 MP3_SYNC = 0xFF
+# The second byte of a header without its last bit ("protection"): MPEG-1
+# (the two version bits), Layer III (the two layer bits).
+MP3_MPEG1_LAYER3 = 0xFA
+MP3_PROTECTION_BIT = 0xFE
 
 
 def mp3_frame_length(header: bytes) -> int:
@@ -1483,7 +1516,7 @@ def mp3_frame_length(header: bytes) -> int:
     if len(header) < MP3_HEADER_SIZE or header[0] != MP3_SYNC:
         return 0
     # Frame sync, MPEG-1, Layer III (the last bit is "no CRC" or "CRC").
-    if header[1] & 0xFE != 0xFA:  # noqa: PLR2004
+    if header[1] & MP3_PROTECTION_BIT != MP3_MPEG1_LAYER3:
         return 0
     index, rate, padding = (
         header[2] >> 4,
@@ -1534,6 +1567,11 @@ class Broadcaster:
     @property
     def has_listeners(self) -> bool:
         return bool(self._clients)
+
+    @property
+    def buffered_bytes(self) -> int:
+        """The size of the latest audio kept for the listeners that join."""
+        return self._recent_size
 
     async def wait_for_listeners(self) -> None:
         while not self._clients:
@@ -1622,7 +1660,7 @@ def _key_pair(now: str, then: str, number: int) -> dict[str, object]:
     }
 
 
-def _parse_genres(body: object) -> list[str]:
+def parse_genres(body: object) -> list[str]:
     genres = body.get("genres") if isinstance(body, dict) else None
     if not isinstance(genres, list) or not all(
         isinstance(g, str) for g in genres
@@ -1638,7 +1676,7 @@ def _add_genres_api(app: web.Application, radio: Radio) -> None:
         return web.json_response(radio.genres_info())
 
     async def put_genres(request: web.Request) -> web.Response:
-        radio.set_wanted_genres(_parse_genres(await _json_body(request)))
+        radio.set_wanted_genres(parse_genres(await _json_body(request)))
         return web.json_response(radio.genres_info())
 
     async def delete_genres(_: web.Request) -> web.Response:
@@ -1646,7 +1684,7 @@ def _add_genres_api(app: web.Application, radio: Radio) -> None:
         return web.json_response(radio.genres_info())
 
     async def put_blocked(request: web.Request) -> web.Response:
-        radio.set_blocked_genres(_parse_genres(await _json_body(request)))
+        radio.set_blocked_genres(parse_genres(await _json_body(request)))
         return web.json_response(radio.genres_info())
 
     async def delete_blocked(_: web.Request) -> web.Response:
@@ -1879,7 +1917,9 @@ def make_app(
     return app
 
 
-async def _encode_loop(radio: Radio, hub: Broadcaster, effects: float) -> None:
+async def _encode_loop(
+    radio: DeckSource, hub: Broadcaster, effects: float
+) -> None:
     """Mix, encode and publish in real time while somebody listens."""
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -1906,8 +1946,8 @@ async def _encode_loop(radio: Radio, hub: Broadcaster, effects: float) -> None:
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
     )
-    assert proc.stdin is not None  # noqa: S101
-    assert proc.stdout is not None  # noqa: S101
+    if proc.stdin is None or proc.stdout is None:
+        raise RuntimeError("ffmpeg has no pipes")
     stdout = proc.stdout
 
     async def forward() -> None:
@@ -1937,8 +1977,8 @@ async def _encode_loop(radio: Radio, hub: Broadcaster, effects: float) -> None:
         await proc.wait()
 
 
-async def _encode_forever(
-    radio: Radio, hub: Broadcaster, effects: float
+async def encode_forever(
+    radio: DeckSource, hub: Broadcaster, effects: float
 ) -> None:
     """Keep the mix going: a failure ends only the mix it happened in."""
     while True:
@@ -1997,8 +2037,7 @@ async def serve(
             ready.set()
         try:
             # Waiting for the user to authorize the app.
-            while not backend.authorized:  # noqa: ASYNC110
-                await sleep(2)
+            await backend.wait_authorized()
             # What the last run left: a failure here must not stop the radio.
             try:
                 await radio.restore_state()
@@ -2014,7 +2053,7 @@ async def serve(
                 raise RuntimeError("The station gave no playable tracks")
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
-                await _encode_forever(radio, hub, EFFECT_LEVELS[effects])
+                await encode_forever(radio, hub, EFFECT_LEVELS[effects])
             finally:
                 refill.cancel()
                 with contextlib.suppress(CancelledError):

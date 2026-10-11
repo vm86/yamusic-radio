@@ -14,13 +14,33 @@ import sqlite3
 import time
 from pathlib import Path
 
-from yamusic_radio.dj_mix import TrackAnalysis, key_detector
+from yamusic_radio.dj_mix import (
+    TrackAnalysis,
+    key_detector,
+    quality_counts,
+)
 
 log = logging.getLogger(__name__)
 
 DEFAULT_CACHE = Path.home() / ".cache/yamusic-radio.db"
 # Rows kept; the ones not used for the longest time go first.
 MAX_ROWS = 20000
+# Transitions counted by a column; what was made before the column was kept
+# is "unknown".
+TRANSITIONS_BY = {
+    "kind": (
+        "SELECT COALESCE(kind, 'unknown'), COUNT(*) FROM transitions "
+        "GROUP BY COALESCE(kind, 'unknown') ORDER BY COUNT(*) DESC"
+    ),
+    "key_relation": (
+        "SELECT COALESCE(key_relation, 'unknown'), COUNT(*) FROM transitions "
+        "GROUP BY COALESCE(key_relation, 'unknown') ORDER BY COUNT(*) DESC"
+    ),
+    "effect": (
+        "SELECT COALESCE(effect, 'unknown'), COUNT(*) FROM transitions "
+        "GROUP BY COALESCE(effect, 'unknown') ORDER BY COUNT(*) DESC"
+    ),
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tracks (
@@ -224,25 +244,21 @@ class TrackCache:
     def transition_stats(self) -> dict[str, object]:
         """Count the transitions ever made by kind and by key change."""
 
-        def count(column: str) -> dict[str, int]:
-            # What was made before the column was kept is "unknown".
-            rows = self._db.execute(
-                f"SELECT COALESCE({column}, 'unknown'), COUNT(*) "  # noqa: S608
-                f"FROM transitions "
-                f"GROUP BY COALESCE({column}, 'unknown') "
-                f"ORDER BY COUNT(*) DESC"
-            ).fetchall()
+        def count(query: str) -> dict[str, int]:
+            rows = self._db.execute(query).fetchall()
             return {str(name): int(number) for name, number in rows}
 
         total, matched = self._db.execute(
             "SELECT COUNT(*), COALESCE(SUM(beat_matched), 0) FROM transitions"
         ).fetchone()
+        by_key = count(TRANSITIONS_BY["key_relation"])
         return {
             "total": int(total),
             "beat_matched": int(matched),
-            "by_type": count("kind"),
-            "by_key": count("key_relation"),
-            "by_effect": count("effect"),
+            "by_type": count(TRANSITIONS_BY["kind"]),
+            "by_key": by_key,
+            "by_quality": quality_counts(by_key),
+            "by_effect": count(TRANSITIONS_BY["effect"]),
         }
 
     def known_genres(self) -> list[tuple[str, int]]:

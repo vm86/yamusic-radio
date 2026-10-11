@@ -1,4 +1,3 @@
-# ruff: noqa: S101, PLR2004
 from __future__ import annotations
 
 import dataclasses
@@ -6,6 +5,7 @@ import json
 import sqlite3
 from typing import TYPE_CHECKING
 
+import yamusic_radio.cache as cache_module
 from yamusic_radio.cache import MAX_ROWS, TrackCache
 from yamusic_radio.dj_mix import TrackAnalysis, key_detector
 
@@ -13,6 +13,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+
+
+def sql(
+    path: Path, query: str, params: tuple[object, ...] = ()
+) -> list[tuple[object, ...]]:
+    """Run a query on the database file behind the cache's back."""
+    db = sqlite3.connect(path)
+    try:
+        with db:
+            return db.execute(query, params).fetchall()
+    finally:
+        db.close()
+
 
 ANALYSIS = TrackAnalysis(
     bpm=124.0,
@@ -40,16 +53,18 @@ def test_analysis_survives_reopen(tmp_path: Path) -> None:
     reopened.close()
 
 
-def test_unreadable_analysis_is_ignored(track_cache: TrackCache) -> None:
+def test_unreadable_analysis_is_ignored(
+    track_cache: TrackCache, cache_path: Path
+) -> None:
     cache = track_cache
     cache.put_analysis("1", "mp3", "A - B", ANALYSIS)
-    cache._db.execute("UPDATE tracks SET analysis = '{\"bpm\": 1}'")  # noqa: SLF001
+    sql(cache_path, "UPDATE tracks SET analysis = '{\"bpm\": 1}'")
 
     assert cache.get_analysis("1", "mp3") is None
 
 
 def test_recently_played_is_newest_first_and_limited(
-    track_cache: TrackCache,
+    track_cache: TrackCache, cache_path: Path
 ) -> None:
     cache = track_cache
     for track_id in "abc":
@@ -57,7 +72,8 @@ def test_recently_played_is_newest_first_and_limited(
     cache.put_analysis("unplayed", "mp3", "x", ANALYSIS)
     for offset, track_id in enumerate("abc"):
         cache.mark_played(track_id, "mp3")
-        cache._db.execute(  # noqa: SLF001
+        sql(
+            cache_path,
             "UPDATE tracks SET played_at = ? WHERE track_id = ?",
             (1000 + offset, track_id),
         )
@@ -67,16 +83,16 @@ def test_recently_played_is_newest_first_and_limited(
 
 
 def test_prune_drops_least_recently_used(
-    track_cache: TrackCache, monkeypatch: object
+    track_cache: TrackCache, cache_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cache = track_cache
-    import yamusic_radio.cache as module  # noqa: PLC0415
-
-    monkeypatch.setattr(module, "MAX_ROWS", 3)  # type: ignore[attr-defined]
+    monkeypatch.setattr(cache_module, "MAX_ROWS", 3)
     for i in range(5):
         cache.put_analysis(str(i), "mp3", str(i), ANALYSIS)
-        cache._db.execute(  # noqa: SLF001
-            "UPDATE tracks SET used_at = ? WHERE track_id = ?", (i, str(i))
+        sql(
+            cache_path,
+            "UPDATE tracks SET used_at = ? WHERE track_id = ?",
+            (i, str(i)),
         )
 
     cache.put_analysis("5", "mp3", "5", ANALYSIS)
@@ -87,20 +103,18 @@ def test_prune_drops_least_recently_used(
 
 
 def test_analysis_with_an_unknown_key_detector_is_analyzed_again(
-    track_cache: TrackCache,
+    track_cache: TrackCache, cache_path: Path
 ) -> None:
     cache = track_cache
     cache.put_analysis("1", "mp3", "A - B", ANALYSIS)
     stored = json.loads(
-        cache._db.execute("SELECT analysis FROM tracks").fetchone()[0]  # noqa: SLF001
+        str(sql(cache_path, "SELECT analysis FROM tracks")[0][0])
     )
     assert stored["key_by"] == key_detector()
 
     for key_by in (None, "something else"):
         stored["key_by"] = key_by
-        cache._db.execute(  # noqa: SLF001
-            "UPDATE tracks SET analysis = ?", (json.dumps(stored),)
-        )
+        sql(cache_path, "UPDATE tracks SET analysis = ?", (json.dumps(stored),))
         assert cache.get_analysis("1", "mp3") is None
 
 
@@ -210,9 +224,12 @@ def test_settings_survive_a_reopen_and_can_be_changed_and_deleted(
     reopened.close()
 
 
-def test_a_setting_that_is_not_json_is_ignored(track_cache: TrackCache) -> None:
-    track_cache._db.execute(  # noqa: SLF001
-        "INSERT INTO settings (key, value) VALUES ('moods', '{not json')"
+def test_a_setting_that_is_not_json_is_ignored(
+    track_cache: TrackCache, cache_path: Path
+) -> None:
+    sql(
+        cache_path,
+        "INSERT INTO settings (key, value) VALUES ('moods', '{not json')",
     )
 
     assert track_cache.get_setting("moods") is None

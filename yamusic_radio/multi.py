@@ -9,13 +9,14 @@ alone for a while (longer each time) and the others carry on.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from yamusic_radio.backend import AuthError, AuthPrompt
+from yamusic_radio.backend import AuthError, AuthPrompt, BackendError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -75,6 +76,8 @@ class MultiBackend:
         self._clock = clock
         self._running: dict[str, _Running] = {}
         self._last = ""
+        # Set when a backend is turned on or off.
+        self._changed_event = asyncio.Event()
         for spec in specs:
             if spec.id in enabled or spec.configured():
                 self._start(spec.id)
@@ -86,6 +89,7 @@ class MultiBackend:
         self._running[backend_id] = _Running(spec, backend, station)
         if not backend.authorized:
             backend.start_auth()
+        self._changed_event.set()
         log.info("Music backend on: %s", spec.name)
 
     def _changed(self) -> None:
@@ -109,6 +113,7 @@ class MultiBackend:
         if running is None:
             return
         await running.backend.aclose()
+        self._changed_event.set()
         self._changed()
         log.info("Music backend off: %s", running.spec.name)
 
@@ -230,7 +235,22 @@ class MultiBackend:
             if not running.backend.authorized:
                 running.backend.start_auth()
 
-    async def authorize(self, values: dict[str, str]) -> None:
+    async def wait_authorized(self) -> None:
+        while not self.authorized:
+            self._changed_event.clear()
+            waits: list[asyncio.Task[object]] = [
+                asyncio.create_task(r.backend.wait_authorized())
+                for r in self._running.values()
+            ]
+            waits.append(asyncio.create_task(self._changed_event.wait()))
+            try:
+                await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for wait in waits:
+                    wait.cancel()
+                await asyncio.gather(*waits, return_exceptions=True)
+
+    async def authorize(self, values: dict[str, str], /) -> None:
         for running in self._running.values():
             if not running.backend.authorized:
                 await running.backend.authorize(values)
@@ -248,7 +268,8 @@ class MultiBackend:
 
     async def station_batch(
         self,
-        station_id: str,  # noqa: ARG002
+        _station_id: str,
+        /,
         *,
         exclude_track_ids: set[str],
     ) -> list[Track]:
@@ -259,7 +280,7 @@ class MultiBackend:
                 batch = await running.backend.station_batch(
                     running.station, exclude_track_ids=exclude_track_ids
                 )
-            except Exception as err:  # noqa: BLE001
+            except BackendError as err:
                 self._failed(running, err)
                 last_error = err
                 continue
@@ -286,7 +307,7 @@ class MultiBackend:
         running = self._owner(track)
         try:
             await running.backend.download(self._native(track), path)
-        except Exception as err:
+        except BackendError as err:
             self._failed(running, err)
             raise
         self._worked(running)
@@ -295,8 +316,9 @@ class MultiBackend:
         self,
         track: Track,
         feedback: Feedback,
-        station_id: str,  # noqa: ARG002
+        _station_id: str,
         total_played_seconds: float,
+        /,
     ) -> None:
         running = self._owner(track)
         await running.backend.feedback_track(
@@ -307,8 +329,7 @@ class MultiBackend:
         )
 
     async def station_settings(
-        self,
-        station_id: str,  # noqa: ARG002
+        self, _station_id: str, /
     ) -> tuple[str, str, str]:
         steering = self._steering()
         if not steering:
@@ -317,10 +338,11 @@ class MultiBackend:
 
     async def set_station_settings(
         self,
-        station_id: str,  # noqa: ARG002
+        _station_id: str,
         mood_energy: str,
         diversity: str,
         language: str,
+        /,
     ) -> None:
         errors: list[Exception] = []
         steering = self._steering()
@@ -329,7 +351,7 @@ class MultiBackend:
                 await running.backend.set_station_settings(
                     running.station, mood_energy, diversity, language
                 )
-            except Exception as err:  # noqa: BLE001
+            except BackendError as err:
                 log.warning("%s: no new station settings", running.spec.name)
                 errors.append(err)
         if steering and len(errors) == len(steering):

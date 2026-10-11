@@ -2895,7 +2895,7 @@ async def test_stream_starts_with_the_preroll() -> None:
     async with TestClient(TestServer(app)) as client:
         started = asyncio.get_running_loop().time()
         response = await client.get("/stream")
-        body = await asyncio.wait_for(response.content.read(30000), 2)
+        body = await asyncio.wait_for(response.content.readexactly(30000), 2)
         waited = asyncio.get_running_loop().time() - started
 
     # 2 s of audio is there at once (a live stream gives 24 KB a second).

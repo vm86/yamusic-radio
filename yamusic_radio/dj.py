@@ -346,6 +346,13 @@ class Radio:
         # the one already decoded to come next.
         self._now: Deck | None = None
         self._now_since = 0.0
+        # The mix is paused: by the API, or because nobody listens (held).
+        # The time of the track that plays does not run meanwhile.
+        self._user_paused = False
+        self._held = False
+        self._paused_at: float | None = None
+        self._resumed = Event()
+        self._resumed.set()
         # The next track was asked for (see request_skip); a transition is
         # under way (from its count to the end of the track that is left);
         # and how long the track left was heard, if it was skipped.
@@ -657,9 +664,7 @@ class Radio:
             "now": (
                 {
                     **now.to_dict(),
-                    "elapsed_seconds": round(
-                        time.monotonic() - self._now_since, 1
-                    ),
+                    "elapsed_seconds": round(self._heard(), 1),
                 }
                 if now is not None
                 else None
@@ -667,7 +672,59 @@ class Radio:
             "next": [t.to_dict() for t in self.upcoming(after)],
             "moods": self.moods_info(),
             "skip_pending": self._skip,
+            **self.pause_info(),
         }
+
+    def _heard(self) -> float:
+        """Seconds of the track that plays, not counting the pauses."""
+        return (self._paused_at or time.monotonic()) - self._now_since
+
+    def _sync_clock(self) -> None:
+        """Stop the time of the track while paused, run it again after."""
+        paused = self.paused
+        if paused and self._paused_at is None:
+            self._paused_at = time.monotonic()
+        elif not paused and self._paused_at is not None:
+            self._now_since += time.monotonic() - self._paused_at
+            self._paused_at = None
+
+    @property
+    def paused(self) -> bool:
+        """Is the mix standing: paused by the API, or nobody listens."""
+        return self._user_paused or self._held
+
+    @property
+    def user_paused(self) -> bool:
+        return self._user_paused
+
+    def pause(self) -> None:
+        """Pause the mix for everyone, until resume()."""
+        self._user_paused = True
+        self._resumed.clear()
+        self._sync_clock()
+
+    def resume(self) -> None:
+        self._user_paused = False
+        self._resumed.set()
+        self._sync_clock()
+
+    def hold(self, *, held: bool) -> None:
+        """Note that the mix waits for listeners, or goes on."""
+        self._held = held
+        self._sync_clock()
+
+    async def wait_resumed(self) -> None:
+        await self._resumed.wait()
+
+    def pause_info(self) -> dict[str, object]:
+        reason = (
+            "user"
+            if self._user_paused
+            else "no_listeners"
+            if self._held
+            else None
+        )
+        return {"paused": reason is not None, "pause_reason": reason}
 
     @property
     def skip_requested(self) -> bool:
@@ -688,7 +745,7 @@ class Radio:
     def skip_taken(self) -> None:
         """Note that the track that plays is left early, at the user's wish."""
         self._skip = False
-        self._heard_seconds = time.monotonic() - self._now_since
+        self._heard_seconds = self._heard()
 
     def moods_info(self) -> dict[str, object]:
         return {
@@ -1139,6 +1196,8 @@ class Radio:
             )
         self._now = deck
         self._now_since = time.monotonic()
+        if self._paused_at is not None:
+            self._paused_at = self._now_since
         if deck.source is not None:
             deck.source.path.unlink(missing_ok=True)
             deck.source = None
@@ -1241,6 +1300,13 @@ class DeckSource(Protocol):
     def started(self, deck: Deck, /) -> None: ...
 
     def finished(self, deck: Deck, /) -> None: ...
+
+    @property
+    def user_paused(self) -> bool: ...
+
+    def hold(self, *, held: bool) -> None: ...
+
+    async def wait_resumed(self) -> None: ...
 
 
 def _early_plan(
@@ -1733,6 +1799,16 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
         # queue, like GET /api/queue gives it, not a part to be taken for it.
         return web.json_response(radio.queue(), status=202)
 
+    async def pause(_: web.Request) -> web.Response:
+        radio.pause()
+        return web.json_response(radio.pause_info())
+
+    async def resume(_: web.Request) -> web.Response:
+        radio.resume()
+        return web.json_response(radio.pause_info())
+
+    app.router.add_post("/api/pause", pause)
+    app.router.add_post("/api/resume", resume)
     app.router.add_post("/api/queue/refresh", refresh_queue)
     app.router.add_post("/api/next", next_track)
 
@@ -1962,8 +2038,14 @@ async def _encode_loop(
     produced = 0.0
     try:
         async for pcm, title in mix(radio, effects):
-            if not hub.has_listeners:
-                await hub.wait_for_listeners()
+            if radio.user_paused or not hub.has_listeners:
+                radio.hold(held=True)
+                while radio.user_paused or not hub.has_listeners:
+                    if radio.user_paused:
+                        await radio.wait_resumed()
+                    else:
+                        await hub.wait_for_listeners()
+                radio.hold(held=False)
                 started, produced = loop.time(), 0.0
             hub.title = title
             proc.stdin.write(np.ascontiguousarray(pcm).tobytes())

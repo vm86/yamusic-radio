@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import itertools
 import re
 import shutil
 import sqlite3
 import subprocess
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -30,7 +32,7 @@ from yamusic_radio.multi import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
     from pathlib import Path
 
     from yamusic_radio.backend import MusicBackend
@@ -211,6 +213,14 @@ class FakeRadio:
         self.transitions.append((kind, effect))
         if report is not None:
             self.reports.append(report)
+
+    user_paused = False
+
+    def hold(self, *, held: bool) -> None:
+        self.events.append(("hold", str(held)))
+
+    async def wait_resumed(self) -> None:
+        self.user_paused = False
 
     def started(self, deck: dj.Deck) -> None:
         self.events.append(("started", deck.title))
@@ -3529,3 +3539,107 @@ async def test_the_radio_stays_up_and_retries_while_no_backend_gives_tracks(
 
     assert len(attempts) == 3
     assert pauses == [dj.STARTUP_RETRY_SECONDS] * 2
+
+
+def test_the_time_of_the_track_stops_while_paused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    radio._now_since = 100.0  # noqa: SLF001
+
+    def heard() -> float:
+        return radio._heard()  # noqa: SLF001
+
+    clock[0] = 110.0
+    assert heard() == 10.0
+    radio.pause()
+    clock[0] = 150.0
+    assert heard() == 10.0
+    assert radio.pause_info() == {"paused": True, "pause_reason": "user"}
+    radio.resume()
+    clock[0] = 155.0
+    assert heard() == 15.0  # the 40 s of the pause are not counted
+    radio.hold(held=True)  # nobody listens
+    clock[0] = 200.0
+    assert heard() == 15.0
+    assert radio.pause_info() == {
+        "paused": True,
+        "pause_reason": "no_listeners",
+    }
+    radio.hold(held=False)
+    assert heard() == 15.0
+    assert radio.pause_info() == {"paused": False, "pause_reason": None}
+
+
+@pytest.mark.asyncio
+async def test_pause_and_resume_in_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        reply = await client.post("/api/pause")
+        assert reply.status == 200
+        assert await reply.json() == {"paused": True, "pause_reason": "user"}
+        assert radio.user_paused
+        queue = await (await client.get("/api/queue")).json()
+        assert queue["paused"] is True
+        assert queue["pause_reason"] == "user"
+
+        reply = await client.post("/api/resume")
+        assert await reply.json() == {"paused": False, "pause_reason": None}
+        assert not radio.user_paused
+
+
+@pytest.mark.asyncio
+async def test_the_mix_stands_while_paused_or_without_listeners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[int] = []
+
+    async def chunks(*_: object) -> AsyncIterator[tuple[np.ndarray, str]]:
+        for i in range(10_000):
+            made.append(i)
+            yield np.zeros((1024, 2), dtype=np.float32), f"t{i}"
+
+    monkeypatch.setattr(dj, "mix", chunks)
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
+    hub = dj.Broadcaster()
+    task = asyncio.create_task(dj._encode_loop(radio, hub, 0.0))  # noqa: SLF001
+
+    async def settle() -> int:
+        await asyncio.sleep(0.2)
+        return len(made)
+
+    try:
+        # Nobody listens: the first chunk is made and the mix waits.
+        assert await settle() == 1
+        assert radio.pause_info()["pause_reason"] == "no_listeners"
+
+        queue = hub.subscribe()
+        assert await settle() > 1
+        assert not radio.paused
+        assert not queue.empty()
+
+        radio.pause()  # the listener stays, the mix still stands
+        await asyncio.sleep(0.1)
+        stood = len(made)
+        assert await settle() == stood
+        assert radio.pause_info()["pause_reason"] == "user"
+
+        radio.resume()
+        assert await settle() > stood
+        assert not radio.paused
+
+        hub.unsubscribe(queue)  # the listener goes: the mix pauses
+        await asyncio.sleep(0.1)
+        stood = len(made)
+        assert await settle() == stood
+        assert radio.pause_info()["pause_reason"] == "no_listeners"
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

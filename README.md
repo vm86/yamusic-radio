@@ -53,7 +53,15 @@ boundary), so the player can start at once instead of after the ~1.5 s that a
 browser waits for audio arriving at the pace it plays; the price is that the
 listener is ~3 s behind the encoder. `PREROLL_SECONDS` in `dj.py`.
 
+The mix stands while nobody listens to the stream (the pause is then
+`pause_reason: "no_listeners"`, and the time of the track stops too) and goes
+on with the first listener; `POST /api/pause` holds it for everyone until
+`POST /api/resume`.
+
 The stream has no authentication: bind only to trusted networks (`--host`).
+`/stream` is sent with `Access-Control-Allow-Origin: *`, so a page of another
+origin can play it in an `<audio crossorigin>` and analyze the sound with Web
+Audio.
 
 ## Key detection
 
@@ -123,7 +131,7 @@ stay on neighbouring keys (a fifth of them would by chance).
 ## Web page
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
-play/pause and volume, the current track with its progress, the previous and
+play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away) and volume, the current track with its progress, the previous and
 the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
 transition statistics, and the backends: which are on, the sign-in of each
 (the code of a device flow, or the fields it asks for). The theme is light,
@@ -150,7 +158,7 @@ Served next to the stream, no authentication.
 
 | Request | Answer |
 |---|---|
-| `GET /api/queue?previous=2&next=15` | `previous` (oldest first), `now`, `next` and `moods`. Both counts are capped at 15; the defaults are 2 and 15. |
+| `GET /api/queue?previous=2&next=15` | `previous` (oldest first), `now` (with `elapsed_seconds`, which does not run while the mix is paused), `next`, `moods`, the state of the next track button (`skip_pending`, `blending`, `can_skip`, as in `GET /api/next`) and the pause (`paused`, `pause_reason`, as in `POST /api/pause`). Both counts are capped at 15; the defaults are 2 and 15. |
 | `POST /api/queue/refresh` | Choose the next tracks anew among the ones already loaded: the track already chosen and decoded goes back to the pool, tracks of moods and genres that are not selected are dropped (the genres picked since come into force here). Tracks of other genres are not downloaded; one without a genre is not played while genres are selected. Answers like `GET /api/queue`. |
 | `GET /api/genres` | `available` (the genres of the tracks heard so far, the most common first), `selected` (picked) and `applied` (the queue is built from these). Empty is any genre. |
 | `PUT /api/genres` `{"genres": ["house"]}` | Pick genres. Nothing is rebuilt: they come into force with the next `POST /api/queue/refresh`. `DELETE /api/genres` picks any. |
@@ -158,6 +166,8 @@ Served next to the stream, no authentication.
 | `GET /api/stats` | How the tracks were blended: `session` (this run) and `all_time` (from the cache, `null` without one), each with `total`, `beat_matched`, `by_type` (`bass swap`, `eq blend`, `filter sweep`, `crossfade`: what was really made, a blend too short for a filtered one is a crossfade), `by_effect` (`none`, `drop`: a riser and a boom, `echo`: an echo-out; `unknown` for blends made before the effects were counted) and `by_key` (`same`, `neighbour`, `boost`, `semitone`, `down`, `diagonal`, `clash`, `unknown`) and `by_quality` (the same, summed up: `good` is `same` and `neighbour`, `fair` is `boost`, `semitone`, `down` and `diagonal`, `poor` is `clash`). |
 | `GET /api/stats/keys` | Every change of key there was, with how often: `session` and `all_time` (`null` without a cache), each a list of `{"from": "8A", "to": "9A", "relation", "quality", "count"}`, the most common first. A key that was not found is `null`. The page does not show it. |
 | `POST /api/next` | The next track now: it needs the next track to be ready, and the blend starts on the first bar line of the playing track at least 2 s ahead, as smooth as any other (16 beats; the tempo glides, bass swap / EQ blend / sweep). Answers 202 with the queue (`skip_pending: true` until the blend has begun), 409 if nothing plays yet or a transition is already under way. The station is told the track was skipped. |
+| `GET /api/next` | Where the next track button is: `skip_pending` (asked for, waiting for a good beat), `blending` (the blend is under way, until the old track is left behind) and `can_skip` (something plays and neither of the two). The page drives the button by this. |
+| `POST /api/pause`, `POST /api/resume` | Pause the mix for everyone, and go on. The time of the playing track does not run meanwhile. Answer `{"paused": true, "pause_reason": "user"}`, or `{"paused": false, "pause_reason": null}` after a resume. |
 | `GET /api/transitions` | The last 10 blends, the newest last: `from`, `to`, `kind`, `effect`, `beat_matched`, `from_bpm`, `to_bpm`, `glide` (how far the tempo glided, `0.05` is 5% faster), `seconds`, `loudness_gap_db`, `key_relation`, `over_db` (how far above the limiter's ceiling the blend peaked before it was limited) and `at`. To look at a transition that did not sound right. |
 | `GET /api/auth` | `authorized` (a backend can give tracks), and while it cannot, what to do to sign in: the `url` to open and the `code` to enter there (both `null` once authorized, or until the service has given them) and `fields` (`{"name", "label", "secret"}`: values to type, `[]` for a device flow). `backends` lists every backend with the same keys plus `id`, `name`, `enabled` and `available` (signed in and not resting after failures). The server is up during authorization. |
 | `POST /api/auth` `{"backend": "id", "values": {"login": "..."}}` | Sign in with the values of the `fields` of the backend (without `backend`, of the radio's own). Answers like `GET /api/auth`; 400 if the backend turns them down. |

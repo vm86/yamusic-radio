@@ -3,8 +3,8 @@
 Endless DJ radio from a music service. Takes tracks from a Yandex Music
 station (or from any other service you add as a [backend](#adding-a-music-backend),
 several at once), beat-matches them (bass swap, three-band EQ blend, filter
-sweeps, optional effects) and streams one continuous MP3 over HTTP with ICY
-titles.
+sweeps, optional effects) and streams one continuous mix over HTTP: MP3 at
+320 kbit/s with ICY titles, and a lossless FLAC stream.
 
 ## Run
 
@@ -14,7 +14,7 @@ Needs Python >= 3.12 and `ffmpeg` with libmp3lame in `PATH`.
 python -m venv .venv && .venv/bin/pip install -e ".[test,lint]"
 .venv/bin/yamusic-dj --wait --port 8000 --backend yandex
 .venv/bin/yamusic-dj --mood-arc --effects full --host 0.0.0.0
-# listen: http://127.0.0.1:8000/stream
+# listen: http://127.0.0.1:8000/stream (MP3) or /stream.flac (lossless)
 ```
 
 **Music backends.** The tracks come from the backends that are on; with
@@ -48,10 +48,21 @@ kept in the cache for as long as the account has another one, so if the radio
 is killed the next run puts it back first. For a backend that does not, the
 radio finds the mood of each track by its sound (energy and key).
 
+## Streams
+
+Both streams carry the same mix and are always on (the radio runs two
+encoders, one `ffmpeg` for each):
+
+| URL | Format | Notes |
+|---|---|---|
+| `/stream` | MP3, 320 kbit/s (`MP3_BITRATE` in `dj.py`; `libmp3lame`) | With ICY titles (`Icy-MetaData: 1`). Plays in any player. |
+| `/stream.flac` | FLAC, lossless, 16 bit | The mix is dithered to 16 bit (triangular dither, as for a CD). No titles: the stream carries no tags. About 110 kB a second, so mind the network. |
+
 A new listener gets the latest 3 s of the stream at once (from a frame
-boundary), so the player can start at once instead of after the ~1.5 s that a
-browser waits for audio arriving at the pace it plays; the price is that the
-listener is ~3 s behind the encoder. `PREROLL_SECONDS` in `dj.py`.
+boundary; a FLAC listener gets the stream header first), so the player can
+start at once instead of after the ~1.5 s that a browser waits for audio
+arriving at the pace it plays; the price is that the listener is ~3 s behind
+the encoder. `PREROLL_SECONDS` in `dj.py`.
 
 The mix stands while nobody listens to the stream (the pause is then
 `pause_reason: "no_listeners"`, and the time of the track stops too) and goes
@@ -131,7 +142,7 @@ stay on neighbouring keys (a fifth of them would by chance).
 ## Web page
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
-play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away) and volume, the current track with its progress, the previous and
+play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the FLAC stream (remembered) and volume, the current track with its progress, the previous and
 the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
 transition statistics, and the backends: which are on, the sign-in of each
 (the code of a device flow, or the fields it asks for). The theme is light,

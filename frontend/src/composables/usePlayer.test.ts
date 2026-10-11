@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { useToast } from "./useToast";
 
 // An <audio> that plays until it is told, like the live stream does.
@@ -45,6 +45,33 @@ describe("the audio element", () => {
   it("asks for the stream with CORS, so that the sound can be analyzed", () => {
     usePlayer(ref(null));
     expect(FakeAudio.last.crossOrigin).toBe("anonymous");
+  });
+});
+
+describe("the stream format", () => {
+  beforeEach(() => localStorage.removeItem("format"));
+
+  it("listens to MP3 at first, and goes over to FLAC at once while playing", async () => {
+    const player = usePlayer(ref(null));
+    await player.toggle();
+    expect(FakeAudio.last.getAttribute("src")).toMatch(/^stream\?/);
+
+    player.format.value = "flac";
+    await nextTick();
+    await Promise.resolve();
+
+    expect(FakeAudio.last.getAttribute("src")).toMatch(/^stream\.flac\?/);
+    expect(player.playing.value).toBe(true);
+    expect(localStorage.getItem("format")).toBe("flac");
+  });
+
+  it("remembers the format, and doesn't start playing by it", async () => {
+    localStorage.setItem("format", "flac");
+    const player = usePlayer(ref(null));
+    expect(player.format.value).toBe("flac");
+    expect(player.playing.value).toBe(false);
+    await player.toggle();
+    expect(FakeAudio.last.getAttribute("src")).toMatch(/^stream\.flac\?/);
   });
 });
 

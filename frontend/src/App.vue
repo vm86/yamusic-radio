@@ -32,6 +32,7 @@ const player = usePlayer(radio.now);
     <div class="column">
       <PlayerCard
         v-model:volume="player.volume.value"
+        v-model:format="player.format.value"
         :now="radio.now.value"
         :elapsed="radio.elapsed.value"
         :playing="player.playing.value"

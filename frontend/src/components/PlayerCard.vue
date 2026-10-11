@@ -3,6 +3,8 @@ import { computed } from "vue";
 import type { NowTrack } from "../api";
 import { clock } from "../format";
 import { moodNames, t } from "../i18n";
+import type { StreamFormat } from "../composables/usePlayer";
+import FormatSwitch from "./FormatSwitch.vue";
 import Icon from "./Icon.vue";
 import KeyTag from "./KeyTag.vue";
 import VinylRecord from "./VinylRecord.vue";
@@ -19,6 +21,7 @@ const props = defineProps<{
   blending?: boolean;
 }>();
 const volume = defineModel<number>("volume", { required: true });
+const format = defineModel<StreamFormat>("format", { default: "mp3" });
 defineEmits<{ toggle: []; skip: [] }>();
 
 const title = computed(() => props.now?.title ?? t("player.nothing"));
@@ -98,6 +101,7 @@ const progress = computed(() => {
         />
       </label>
     </div>
+    <FormatSwitch v-model="format" />
   </section>
 </template>
 

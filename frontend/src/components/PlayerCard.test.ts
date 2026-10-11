@@ -36,6 +36,19 @@ function card(props: Record<string, unknown> = {}) {
 const skipButton = (wrapper: ReturnType<typeof card>) =>
   wrapper.findAll("button").find((b) => b.attributes("aria-label")?.includes("трек") || b.attributes("aria-label")?.includes("бит"))!;
 
+describe("PlayerCard stream format", () => {
+  it("picks the stream", async () => {
+    const wrapper = card();
+    const [mp3, flac] = wrapper.findAll("[role=radio]");
+    expect(mp3?.attributes("aria-checked")).toBe("true");
+    expect(flac?.attributes("aria-checked")).toBe("false");
+
+    await flac?.trigger("click");
+
+    expect(wrapper.emitted("update:format")).toEqual([["flac"]]);
+  });
+});
+
 describe("PlayerCard next track button", () => {
   it("asks for the next track", async () => {
     const wrapper = card();

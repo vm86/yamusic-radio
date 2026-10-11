@@ -38,6 +38,9 @@ export const en: Messages = {
   "player.next": "Next track",
   "player.blending": "Blending…",
   "player.volume": "Volume",
+  "player.format": "Stream",
+  "player.formatMp3": "MP3, 320 kbit/s",
+  "player.formatFlac": "FLAC, lossless",
   "player.play": "Listen",
   "player.stop": "Stop",
 

@@ -37,6 +37,9 @@ export const ru = {
   "player.next": "Следующий трек",
   "player.blending": "Идёт переход…",
   "player.volume": "Громкость",
+  "player.format": "Поток",
+  "player.formatMp3": "MP3, 320 кбит/с",
+  "player.formatFlac": "FLAC, без потерь",
   "player.play": "Слушать",
   "player.stop": "Остановить",
 

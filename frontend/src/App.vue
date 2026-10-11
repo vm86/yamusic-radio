@@ -22,10 +22,10 @@ const player = usePlayer(radio.now);
 
   <main>
     <AuthCard
-      v-if="radio.auth.value && !radio.auth.value.authorized"
+      v-if="radio.auth.value && (!radio.auth.value.authorized || (radio.auth.value.backends?.length ?? 0) > 1)"
       :auth="radio.auth.value"
       class="auth-wide"
-      @select="radio.selectBackend"
+      @toggle="radio.setBackend"
       @sign-in="radio.signIn"
     />
 

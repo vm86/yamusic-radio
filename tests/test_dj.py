@@ -7,7 +7,7 @@ import dataclasses
 import itertools
 import re
 import shutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from aiohttp import web
@@ -25,10 +25,11 @@ from yamusic_radio.backend import (  # noqa: E402
     AuthField,
     AuthPrompt,
     Feedback,
+    Track,
 )
-from yamusic_radio.selector import (  # noqa: E402
-    BackendSelector,
+from yamusic_radio.multi import (  # noqa: E402
     BackendSpec,
+    MultiBackend,
 )
 
 SR = dj_mix.SAMPLE_RATE
@@ -660,8 +661,11 @@ class FakeBackend:
     supports_moods = True
     default_station = "station"
 
-    def __init__(self, batches: list[list[FakeTrack]]) -> None:
+    def __init__(self, batches: list[list[Any]]) -> None:
         self.batches = batches
+        self.mood: str | None = None
+        self.fail: Exception | None = None
+        self.downloaded: list[str] = []
         self.requests = 0
         self.feedback: list[tuple[str, str, float]] = []
         self.settings: list[tuple[str, str, str]] = []
@@ -672,11 +676,16 @@ class FakeBackend:
 
     async def station_batch(
         self, station_id: str, *, exclude_track_ids: set[str]
-    ) -> list[FakeTrack]:
+    ) -> list[Any]:
         self.requests += 1
-        if self.batches:
-            return self.batches.pop(0)
-        return [FakeTrack("a")]  # the station only repeats itself
+        if self.fail is not None:
+            raise self.fail
+        batch = self.batches.pop(0) if self.batches else [FakeTrack("a")]
+        # (the station only repeats itself when there are no more batches)
+        for track in batch:  # the mood the station is set to comes with them
+            if self.mood not in (None, "all") and not track.mood:
+                track.mood = str(self.mood)
+        return batch
 
     async def station_settings(self, station_id: str) -> tuple[str, str, str]:
         return "all", "default", "any"
@@ -685,8 +694,12 @@ class FakeBackend:
         self, station_id: str, mood: str, diversity: str, language: str
     ) -> None:
         self.settings.append((mood, diversity, language))
+        self.mood = mood
 
     async def download(self, track: FakeTrack, path: Path) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.downloaded.append(track.track_id)
         path.write_bytes(b"x")
 
     async def feedback_track(
@@ -728,7 +741,7 @@ def make_radio(
     async def download(track: FakeTrack, path: Path) -> None:
         path.write_bytes(b"x")
 
-    async def prepare(track: FakeTrack, mood: str = "") -> None:
+    async def prepare(track: FakeTrack) -> None:
         (tmp_path / f"{track.track_id}.mp3").write_bytes(b"x")
         radio._pool.append(
             dj.Candidate(
@@ -737,7 +750,7 @@ def make_radio(
                 track_analysis(bpms.get(track.track_id, 120)),
                 frozenset(track.artists),
                 track,
-                mood,
+                track.mood,
                 track.genre,
             )
         )
@@ -3155,106 +3168,315 @@ async def test_the_mood_the_backend_gives_wins_over_the_sound(
     assert [c.mood for c in radio.pool] == ["sad"]
 
 
-def specs(made: dict[str, FakeBackend]) -> list[BackendSpec]:
-    def spec(spec_id: str, *, configured: bool = False) -> BackendSpec:
+def real(*names: str, mood: str = "") -> list[Track]:
+    return [
+        Track(n, n.upper(), (f"artist {n}",), "mp3", 192, mood=mood)
+        for n in names
+    ]
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def specs(
+    made: dict[str, FakeBackend],
+    *batches: list[list[Track]],
+    configured: tuple[str, ...] = (),
+) -> list[BackendSpec]:
+    """Make backends "one", "two", ... that give out the batches."""
+
+    def spec(number: int, own: list[list[Track]]) -> BackendSpec:
+        spec_id = ("one", "two", "three")[number]
+
         def create() -> FakeBackend:
-            backend = FakeBackend([])
-            backend.authorized = configured
+            backend = FakeBackend(own)
+            backend.authorized = spec_id in configured
+            backend.default_station = f"{spec_id}-station"
             made[spec_id] = backend
             return backend
 
-        return BackendSpec(spec_id, spec_id.title(), create, lambda: configured)
+        return BackendSpec(
+            spec_id,
+            spec_id.title(),
+            create,
+            lambda: spec_id in configured,
+            plain_ids=number == 0,
+        )
 
-    return [spec("one"), spec("two", configured=True)]
+    return [spec(n, own) for n, own in enumerate(batches)]
 
 
-def test_the_backend_of_the_last_run_or_a_signed_in_one_is_taken() -> None:
+def test_backends_that_are_signed_in_or_asked_for_are_turned_on() -> None:
     made: dict[str, FakeBackend] = {}
-
-    assert BackendSelector(specs(made), initial="one").selected == "one"
-    assert made["one"].auth_started  # not signed in: the sign-in begins
-    assert BackendSelector(specs(made)).selected == "two"
-    assert BackendSelector(specs(made), initial="gone").selected == "two"
-    assert not made["two"].auth_started  # signed in already
-
-
-def test_nothing_is_chosen_while_no_backend_is_signed_in() -> None:
-    selector = BackendSelector([specs({})[0]])
-
-    assert selector.selected is None
-    assert not selector.authorized
-    assert selector.auth_prompt == AuthPrompt()
-    assert selector.default_station == ""
-
-
-@pytest.mark.asyncio
-async def test_choosing_a_backend_swaps_it_until_one_is_signed_in() -> None:
-    made: dict[str, FakeBackend] = {}
-    kept: list[str] = []
-    selector = BackendSelector(
-        specs(made),
-        initial="one",
-        on_select=kept.append,
+    multi = MultiBackend(
+        specs(made, [], [], [], configured=("two",)), enabled=["three"]
     )
-    first = made["one"]
 
-    await selector.select("one")  # already so
-    assert kept == []
-    with pytest.raises(ValueError, match="unknown"):
-        await selector.select("gone")
-    await selector.select("two")
+    assert list(made) == ["two", "three"]
+    assert not made["two"].auth_started  # signed in already
+    assert made["three"].auth_started
+    assert multi.authorized
+    assert [(s["id"], s["enabled"]) for s in multi.status()] == [
+        ("one", False),
+        ("two", True),
+        ("three", True),
+    ]
 
-    assert kept == ["two"]
-    assert selector.selected == "two"
-    assert selector.authorized
-    assert selector.default_station == "station"
-    assert first is not made["two"]
-    with pytest.raises(AuthError):
-        await selector.select("one")  # signed in: no going back
+
+def test_nothing_is_on_until_a_backend_is_asked_for() -> None:
+    multi = MultiBackend(specs({}, []))
+
+    assert not multi.authorized
+    assert multi.auth_prompt == AuthPrompt()
+    assert multi.default_station == ""
+    assert not multi.supports_moods
 
 
 @pytest.mark.asyncio
-async def test_api_chooses_the_backend_and_signs_in(
+async def test_tracks_come_from_each_backend_in_turn() -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(
+            made,
+            [real("a"), real("b")],
+            [real("a"), real("c")],
+            configured=("one", "two"),
+        ),
+    )
+
+    batches = [
+        await multi.station_batch("", exclude_track_ids=set()) for _ in range(4)
+    ]
+
+    ids = [[(t.track_id, t.source, t.native_id) for t in b] for b in batches]
+    assert ids == [
+        [("a", "one", "a")],  # the first backend keeps the ids it gave
+        [("two:a", "two", "a")],  # the others are told apart
+        [("b", "one", "b")],
+        [("two:c", "two", "c")],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_download_and_feedback_go_to_the_owner_with_its_own_id(
+    tmp_path: Path,
+) -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(made, [], [real("a")], configured=("one", "two"))
+    )
+    made["one"].fail = ConnectionError("down")
+    (track,) = await multi.station_batch("", exclude_track_ids=set())
+    made["one"].fail = None
+
+    await multi.download(track, tmp_path / "x")
+    await multi.feedback_track(track, Feedback.STARTED, "", 0.0)
+
+    assert made["two"].downloaded == ["a"]
+    assert made["two"].feedback == [("a", Feedback.STARTED, 0.0)]
+    assert made["one"].downloaded == []
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_fails_is_replaced_by_the_others() -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(
+            made, [real("a")] * 9, [real("b")] * 9, configured=("one", "two")
+        ),
+    )
+    made["one"].fail = ConnectionError("down")
+
+    got = [
+        (await multi.station_batch("", exclude_track_ids=set()))[0].source
+        for _ in range(3)
+    ]
+
+    assert got == ["two", "two", "two"]
+    assert made["one"].requests == 2  # asked twice, then left alone
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_rests_is_tried_again_after_a_while() -> None:
+    made: dict[str, FakeBackend] = {}
+    clock = Clock()
+    multi = MultiBackend(
+        specs(
+            made, [real("a")] * 9, [real("b")] * 9, configured=("one", "two")
+        ),
+        clock=clock,
+    )
+    made["one"].fail = ConnectionError("down")
+    for _ in range(3):
+        await multi.station_batch("", exclude_track_ids=set())
+    assert [s["available"] for s in multi.status()] == [False, True]
+
+    made["one"].fail = None
+    clock.now += 31
+    sources = [
+        (await multi.station_batch("", exclude_track_ids=set()))[0].source
+        for _ in range(2)
+    ]
+
+    assert sorted(sources) == ["one", "two"]
+    assert [s["available"] for s in multi.status()] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_when_every_backend_fails_the_call_fails() -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(specs(made, [], [], configured=("one", "two")))
+    for backend in made.values():
+        backend.fail = ConnectionError("down")
+
+    with pytest.raises(RuntimeError, match="no music backend"):
+        await multi.station_batch("", exclude_track_ids=set())
+
+    with pytest.raises(RuntimeError, match="no music backend"):
+        await multi.station_batch("", exclude_track_ids=set())
+    # All of them rest now, and are still tried, one at a time.
+    with pytest.raises(RuntimeError, match="no music backend"):
+        await multi.station_batch("", exclude_track_ids=set())
+    assert sorted(b.requests for b in made.values()) == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_backend_that_is_not_signed_in_is_left_out() -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(made, [real("a")], [real("b")], configured=("two",)),
+        enabled=["one"],
+    )
+
+    (track,) = await multi.station_batch("", exclude_track_ids=set())
+
+    assert track.source == "two"
+    assert made["one"].requests == 0
+    # the sign-in of the one that waits is what the page is shown
+    made["one"].auth_prompt = AuthPrompt("https://one.example", "CODE")
+    assert multi.auth_prompt.code == "CODE"
+
+
+@pytest.mark.asyncio
+async def test_backends_are_turned_on_and_off_and_remembered() -> None:
+    made: dict[str, FakeBackend] = {}
+    kept: list[list[str]] = []
+    multi = MultiBackend(
+        specs(made, [], [], configured=("one",)), on_change=kept.append
+    )
+
+    await multi.enable("two")
+    await multi.enable("two")  # already on
+    await multi.disable("one")
+    await multi.disable("one")
+    with pytest.raises(ValueError, match="unknown"):
+        await multi.enable("gone")
+
+    assert kept == [["one", "two"], ["two"]]
+    assert made["two"].auth_started
+    assert not multi.authorized
+
+
+@pytest.mark.asyncio
+async def test_each_backend_has_its_own_station_and_the_moods_reach_all() -> (
+    None
+):
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(made, [], [], configured=("one", "two")),
+        stations={"two": "my-station"},
+    )
+
+    assert multi.default_station == "one: one-station, two: my-station"
+    assert multi.supports_moods
+    await multi.set_station_settings("", "calm", "default", "any")
+
+    assert made["one"].settings == [("calm", "default", "any")]
+    assert made["two"].settings == [("calm", "default", "any")]
+
+
+@pytest.mark.asyncio
+async def test_the_pool_mixes_backends_and_the_best_fit_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(
+            made,
+            [real("a", "b")],
+            [real("c", "d")],
+            configured=("one", "two"),
+        ),
+    )
+    bpms = {"a": 100, "b": 100, "two:c": 128, "two:d": 90}
+    radio = make_radio(tmp_path, monkeypatch, multi, bpms)  # type: ignore[arg-type]
+    radio._pool_size = 4
+
+    await radio.fill(4)
+    assert {c.track.source for c in radio.pool if c.track} == {"one", "two"}
+
+    deck = await radio.next_deck(track_analysis(128))
+
+    assert deck.track is not None
+    assert deck.track.track_id == "two:c"  # the tempo of the one before it
+
+
+@pytest.mark.asyncio
+async def test_api_turns_backends_on_and_off_and_signs_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
 
     made: dict[str, FakeBackend] = {}
-    selector = BackendSelector(specs(made)[:1])
-    radio = make_radio(tmp_path, monkeypatch, selector, {})  # type: ignore[arg-type]
-    app = dj.make_app(dj.Broadcaster(), radio, selector)
+    multi = MultiBackend(specs(made, [], []))
+    radio = make_radio(tmp_path, monkeypatch, multi, {})  # type: ignore[arg-type]
+    app = dj.make_app(dj.Broadcaster(), radio, multi)
 
     async with TestClient(TestServer(app)) as client:
         info = await (await client.get("/api/auth")).json()
-        assert info["backend"] is None
-        assert info["backends"] == [{"id": "one", "name": "One"}]
-        reply = await client.post("/api/auth", json={"values": {}})
-        assert reply.status == 409  # nothing to sign in to yet
+        assert [(b["id"], b["enabled"]) for b in info["backends"]] == [
+            ("one", False),
+            ("two", False),
+        ]
 
         assert (await client.put("/api/auth/backend", json={})).status == 400
-        bad = await client.put("/api/auth/backend", json={"backend": "gone"})
-        assert bad.status == 400
+        gone = await client.put("/api/auth/backend", json={"backend": "gone"})
+        assert gone.status == 400
         info = await (
             await client.put("/api/auth/backend", json={"backend": "one"})
         ).json()
-        assert info["backend"] == "one"
+        assert info["backends"][0]["enabled"]
         assert made["one"].auth_started
 
         made["one"].auth_prompt = AuthPrompt(
             fields=(AuthField("password", "Password", secret=True),)
         )
         info = await (await client.get("/api/auth")).json()
-        assert info["fields"] == [
+        assert info["backends"][0]["fields"] == [
             {"name": "password", "label": "Password", "secret": True}
         ]
+        assert info["fields"] == info["backends"][0]["fields"]
         wrong = await client.post(
-            "/api/auth", json={"values": {"password": "x"}}
+            "/api/auth",
+            json={"backend": "one", "values": {"password": "x"}},
         )
         assert wrong.status == 400
         assert (
             await client.post("/api/auth", json={"values": 1})
         ).status == 400
         right = await client.post(
-            "/api/auth", json={"values": {"password": "right"}}
+            "/api/auth",
+            json={"backend": "one", "values": {"password": "right"}},
         )
-        assert (await right.json())["authorized"] is True
+        info = await right.json()
+        assert info["authorized"] is True
+        assert info["backends"][0]["available"] is True
+
+        off = await client.delete("/api/auth/backend/one")
+        assert (await off.json())["authorized"] is False
+        assert (await client.delete("/api/auth/backend/gone")).status == 404

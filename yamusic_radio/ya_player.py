@@ -84,7 +84,7 @@ class ExtendTrack(Track):
             return ""
         return uri if uri.startswith("http") else f"https://{uri}"
 
-    def to_backend_track(self) -> backend.Track:
+    def to_backend_track(self, mood: str = "") -> backend.Track:
         return backend.Track(
             track_id=self.track_id,
             title=self.title or "",
@@ -94,6 +94,7 @@ class ExtendTrack(Track):
             genre=self.genre,
             cover=self.cover,
             batch_id=self.batch_id,
+            mood=mood,
         )
 
 
@@ -165,6 +166,8 @@ class YandexMusicPlayer(ClientAsync):
         self.__settings: dict[str, Any] = {}
         self.__auth_url: str | None = None
         self.__user_code: str | None = None
+        # The mood this process set the station to, None before that.
+        self.__mood: str | None = None
         self.__info_slots = Semaphore(self.DOWNLOAD_INFO_SLOTS)
         self.__session = client_session
 
@@ -313,8 +316,10 @@ class YandexMusicPlayer(ClientAsync):
         loaded = await gather(
             *(self._choose_best_dowanload_info(t) for t in candidates)
         )
+        # Tracks come with the mood the station was set to when they came.
+        mood = "" if self.__mood in (None, "all") else str(self.__mood)
         return [
-            t.to_backend_track()
+            t.to_backend_track(mood)
             for t, ok in zip(candidates, loaded, strict=True)
             if ok
         ]
@@ -350,6 +355,8 @@ class YandexMusicPlayer(ClientAsync):
             station_id, mood_energy, diversity, language
         ):
             log.warning("The station did not accept the new settings")
+            return
+        self.__mood = mood_energy
 
     async def _feedback_batch_edges(
         self, station_id: str, station_tracks: StationTracksResult

@@ -74,6 +74,10 @@ class Track:
     # The mood the backend knows the track by (one of dj_mix.ALL_MOODS), or
     # "" when it doesn't: the radio then judges by the sound of the track.
     mood: str = ""
+    # Set by MultiBackend: the backend the track came from, and the id the
+    # backend knows it by when that is not `track_id`.
+    source: str = ""
+    native_id: str = ""
 
 
 class MusicBackend(Protocol):

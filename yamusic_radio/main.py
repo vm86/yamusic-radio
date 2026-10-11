@@ -14,7 +14,7 @@ from aiohttp import ClientSession, ClientTimeout
 
 from yamusic_radio import dj
 from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
-from yamusic_radio.selector import BackendSelector, BackendSpec
+from yamusic_radio.multi import BackendSpec, MultiBackend
 from yamusic_radio.ya_player import YandexMusicPlayer, has_token
 
 faulthandler.enable()
@@ -24,7 +24,9 @@ DEFAULT_CONFIG = Path.home() / ".config/yamusic-radio.json"
 DEFAULT_LOG = Path.home() / ".cache/yamusic_radio.log"
 # The ids of backend_specs(), for the command line.
 BACKEND_IDS = ("yandex",)
-# The cache setting that keeps the backend of the last run.
+# The cache setting that keeps the backends turned on (the older one,
+# "backend", kept just the one).
+SETTING_BACKENDS = "backends"
 SETTING_BACKEND = "backend"
 
 
@@ -88,10 +90,13 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--backend",
+        action="append",
         choices=BACKEND_IDS,
         help=(
-            "Music backend. By default the one of the last run, or the "
-            "first that is signed in; if none is, the page asks"
+            "Turn a music backend on (repeat for several). The tracks of "
+            "all that are on are mixed. The ones of the last run and the "
+            "ones that are signed in are on too; the page turns them on "
+            "and off"
         ),
     )
     parser.add_argument(
@@ -113,10 +118,12 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--station",
-        default="",
+        action="append",
+        default=[],
         help=(
-            "Station the radio takes its tracks from "
-            "(the backend's own by default)"
+            "Station to take tracks from: ID=STATION for the backend ID "
+            "(repeat for several), or just STATION for the first backend. "
+            "Each backend has its own by default"
         ),
     )
     parser.add_argument(
@@ -177,6 +184,28 @@ def backend_specs(
     ]
 
 
+def _last_backends(cache: TrackCache | None) -> list[str]:
+    """List the backends that were on in the last run."""
+    if cache is None:
+        return []
+    ids = cache.get_setting(SETTING_BACKENDS)
+    if not isinstance(ids, list):
+        ids = [cache.get_setting(SETTING_BACKEND)]
+    return [i for i in ids if isinstance(i, str)]
+
+
+def _stations(values: list[str], first: str) -> dict[str, str]:
+    """Read the --station options: ID=STATION, or STATION for the first."""
+    stations = {}
+    for value in values:
+        backend_id, found, station = value.partition("=")
+        if found and backend_id in BACKEND_IDS:
+            stations[backend_id] = station
+        else:
+            stations[first] = value
+    return stations
+
+
 async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     session = ClientSession(
         raise_for_status=False,
@@ -184,14 +213,15 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     )
     cache = None if options.no_cache else TrackCache(options.cache)
     # What the last run was using, unless the command line says otherwise.
-    last = cache.get_setting(SETTING_BACKEND) if cache is not None else None
-    backend = BackendSelector(
-        backend_specs(options, session),
-        initial=options.backend or (last if isinstance(last, str) else None),
-        on_select=(
+    specs = backend_specs(options, session)
+    backend = MultiBackend(
+        specs,
+        enabled=[*(options.backend or ()), *_last_backends(cache)],
+        stations=_stations(options.station, specs[0].id),
+        on_change=(
             None
             if cache is None
-            else lambda chosen: cache.put_setting(SETTING_BACKEND, chosen)
+            else lambda ids: cache.put_setting(SETTING_BACKENDS, ids)
         ),
     )
     ready = asyncio.Event()
@@ -200,7 +230,6 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
             backend,
             host=options.host,
             port=options.port,
-            station_id=options.station,
             pool_size=options.tracks,
             effects=options.effects,
             mood_arc=options.mood_arc,

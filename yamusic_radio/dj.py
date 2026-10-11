@@ -50,7 +50,7 @@ from yamusic_radio.dj_mix import (
     Pcm,
     TrackAnalysis,
 )
-from yamusic_radio.selector import BackendSelector
+from yamusic_radio.multi import MultiBackend
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -807,7 +807,7 @@ class Radio:
                 self._seen.update(t.track_id for t in fresh)
                 added = len(self._pool)
                 rejected = self._off_mood
-                await gather(*(self._prepare(t, mood) for t in fresh))
+                await gather(*(self._prepare(t) for t in fresh))
                 if len(self._pool) == added and self._off_mood != rejected:
                     # Good tracks, but not of the moods wanted.
                     off_mood_batches += 1
@@ -852,7 +852,7 @@ class Radio:
                 continue
             await self._consumed.wait()
 
-    async def _prepare(self, track: Track, mood: str = "") -> None:
+    async def _prepare(self, track: Track) -> None:
         async with self._slots:
             title = f"{', '.join(track.artists)} - {track.title}"
             path = self._workdir / f"{track.track_id}.{track.codec}"
@@ -865,7 +865,7 @@ class Radio:
                     del pcm
                     self._store_analysis(track, title, analysis)
                 self._store_genre(track)
-                mood = track.mood or mood or dj_mix.mood_of(analysis)
+                mood = track.mood or dj_mix.mood_of(analysis)
             except CancelledError:
                 raise
             except Exception:
@@ -1698,65 +1698,72 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
 
 
 def _auth_info(
-    radio: Radio, selector: BackendSelector | None
+    radio: Radio, backends: MultiBackend | None
 ) -> dict[str, object]:
     info = radio.auth_info()
-    if selector is not None:
-        info["backend"] = selector.selected
-        info["backends"] = [
-            {"id": backend_id, "name": name}
-            for backend_id, name in selector.choices
-        ]
+    if backends is not None:
+        info["backends"] = backends.status()
     return info
 
 
 def _add_backend_api(
     app: web.Application,
     radio: Radio,
-    selector: BackendSelector | None,
+    backends: MultiBackend | None,
 ) -> None:
-    async def choose_backend(request: web.Request) -> web.Response:
-        if selector is None:
-            raise web.HTTPNotFound(text="the backend is not selectable")
+    def known() -> MultiBackend:
+        if backends is None:
+            raise web.HTTPNotFound(text="the backends are not selectable")
+        return backends
+
+    async def turn_on(request: web.Request) -> web.Response:
         body = await _json_body(request)
         chosen = body.get("backend") if isinstance(body, dict) else None
         if not isinstance(chosen, str):
             raise web.HTTPBadRequest(text='expected {"backend": "..."}')
         try:
-            await selector.select(chosen)
+            await known().enable(chosen)
         except ValueError as err:
             raise web.HTTPBadRequest(text=str(err)) from err
-        except AuthError as err:
-            raise web.HTTPConflict(text=str(err)) from err
-        return web.json_response(_auth_info(radio, selector))
+        return web.json_response(_auth_info(radio, backends))
 
-    app.router.add_put("/api/auth/backend", choose_backend)
+    async def turn_off(request: web.Request) -> web.Response:
+        try:
+            await known().disable(request.match_info["backend"])
+        except ValueError as err:
+            raise web.HTTPNotFound(text=str(err)) from err
+        return web.json_response(_auth_info(radio, backends))
+
+    app.router.add_put("/api/auth/backend", turn_on)
+    app.router.add_delete("/api/auth/backend/{backend}", turn_off)
 
 
 def _add_auth_api(
     app: web.Application,
     radio: Radio,
-    selector: BackendSelector | None,
+    backends: MultiBackend | None,
 ) -> None:
-    _add_backend_api(app, radio, selector)
+    _add_backend_api(app, radio, backends)
 
     async def auth(_: web.Request) -> web.Response:
-        return web.json_response(_auth_info(radio, selector))
+        return web.json_response(_auth_info(radio, backends))
 
     async def sign_in(request: web.Request) -> web.Response:
         body = await _json_body(request)
         values = body.get("values") if isinstance(body, dict) else None
+        which = body.get("backend") if isinstance(body, dict) else None
         if not isinstance(values, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in values.items()
         ):
             raise web.HTTPBadRequest(text='expected {"values": {...}}')
         try:
-            await radio.authorize(values)
+            if backends is not None and isinstance(which, str):
+                await backends.authorize_backend(which, values)
+            else:
+                await radio.authorize(values)
         except AuthError as err:
             raise web.HTTPBadRequest(text=str(err)) from err
-        except RuntimeError as err:  # no backend is chosen
-            raise web.HTTPConflict(text=str(err)) from err
-        return web.json_response(_auth_info(radio, selector))
+        return web.json_response(_auth_info(radio, backends))
 
     app.router.add_get("/api/auth", auth)
     app.router.add_post("/api/auth", sign_in)
@@ -1765,10 +1772,10 @@ def _add_auth_api(
 def add_api(
     app: web.Application,
     radio: Radio,
-    selector: BackendSelector | None = None,
+    backends: MultiBackend | None = None,
 ) -> None:
     """Add the REST API to the app, under /api."""
-    _add_auth_api(app, radio, selector)
+    _add_auth_api(app, radio, backends)
 
     async def queue(request: web.Request) -> web.Response:
         return web.json_response(
@@ -1825,7 +1832,7 @@ def _add_web_page(app: web.Application) -> None:
 def make_app(
     hub: Broadcaster,
     radio: Radio | None = None,
-    selector: BackendSelector | None = None,
+    backends: MultiBackend | None = None,
 ) -> web.Application:
     async def stream(request: web.Request) -> web.StreamResponse:
         with_titles = request.headers.get("Icy-MetaData") == "1"
@@ -1868,7 +1875,7 @@ def make_app(
     app.router.add_get("/stream", stream)
     _add_web_page(app)
     if radio is not None:
-        add_api(app, radio, selector)
+        add_api(app, radio, backends)
     return app
 
 
@@ -1979,7 +1986,7 @@ async def serve(
             make_app(
                 hub,
                 radio,
-                backend if isinstance(backend, BackendSelector) else None,
+                backend if isinstance(backend, MultiBackend) else None,
             ),
             access_log=None,
         )

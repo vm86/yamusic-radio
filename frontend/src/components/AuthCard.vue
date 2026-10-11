@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed, reactive } from "vue";
-import type { AuthInfo } from "../api";
+import type { AuthInfo, BackendInfo } from "../api";
 import { t } from "../i18n";
 
 const props = defineProps<{ auth: AuthInfo }>();
 const emit = defineEmits<{
-  select: [backend: string];
-  signIn: [values: Record<string, string>];
+  toggle: [backend: string, on: boolean];
+  signIn: [backend: string, values: Record<string, string>];
 }>();
 
-// The service is chosen first, when there is a choice.
 const backends = computed(() => props.auth.backends ?? []);
-const chosen = computed(() => backends.value.length === 0 || Boolean(props.auth.backend));
-const ready = computed(() => Boolean(props.auth.url && props.auth.code));
-const values = reactive<Record<string, string>>({});
+// A service that is on and not signed in yet shows how to sign in.
+const waiting = computed(() => backends.value.filter((b) => b.enabled && !b.authorized));
+const resting = computed(() => backends.value.filter((b) => b.authorized && !b.available));
+const values = reactive<Record<string, Record<string, string>>>({});
+
+function ready(backend: BackendInfo): boolean {
+  return Boolean(backend.url && backend.code);
+}
+function typed(backend: BackendInfo): Record<string, string> {
+  return (values[backend.id] ??= {});
+}
 </script>
 
 <template>
   <section class="card auth">
-    <h2>{{ t("auth.title") }}</h2>
+    <h2>{{ auth.authorized ? t("auth.titleSources") : t("auth.title") }}</h2>
 
     <div v-if="backends.length" class="backends" role="group" :aria-label="t('auth.backends')">
       <button
@@ -26,37 +33,45 @@ const values = reactive<Record<string, string>>({});
         :key="backend.id"
         class="chip"
         type="button"
-        :aria-pressed="backend.id === auth.backend"
-        @click="emit('select', backend.id)"
+        :aria-pressed="backend.enabled"
+        @click="emit('toggle', backend.id, !backend.enabled)"
       >
         {{ backend.name }}
       </button>
     </div>
-    <p v-if="!chosen">{{ t("auth.choose") }}</p>
+    <p v-if="!backends.some((b) => b.enabled) && backends.length">{{ t("auth.choose") }}</p>
+    <p v-for="backend in resting" :key="backend.id" class="note">{{ backend.name }}: {{ t("auth.resting") }}</p>
 
-    <template v-else>
-      <p v-if="auth.fields.length">{{ t("auth.fill") }}</p>
-      <p v-else>{{ ready ? t("auth.open") : t("auth.waiting") }}</p>
-      <div v-if="ready" class="code">{{ auth.code }}</div>
-      <a v-if="ready" class="btn" :href="auth.url ?? undefined" target="_blank" rel="noopener">
+    <div v-for="backend in waiting" :key="backend.id" class="sign-in">
+      <h3>{{ backend.name }}</h3>
+      <p v-if="backend.fields.length">{{ t("auth.fill") }}</p>
+      <p v-else>{{ ready(backend) ? t("auth.open") : t("auth.waiting") }}</p>
+      <div v-if="ready(backend)" class="code">{{ backend.code }}</div>
+      <a v-if="ready(backend)" class="btn" :href="backend.url ?? undefined" target="_blank" rel="noopener">
         {{ t("auth.link") }}
       </a>
-      <form v-if="auth.fields.length" @submit.prevent="emit('signIn', { ...values })">
-        <label v-for="field in auth.fields" :key="field.name">
+      <form v-if="backend.fields.length" @submit.prevent="emit('signIn', backend.id, { ...typed(backend) })">
+        <label v-for="field in backend.fields" :key="field.name">
           <span>{{ field.label }}</span>
-          <input v-model="values[field.name]" :type="field.secret ? 'password' : 'text'" :name="field.name" required />
+          <input
+            v-model="typed(backend)[field.name]"
+            :type="field.secret ? 'password' : 'text'"
+            :name="field.name"
+            required
+          />
         </label>
         <button class="btn" type="submit">{{ t("auth.submit") }}</button>
       </form>
-    </template>
+    </div>
   </section>
 </template>
 
 <style scoped>
 .auth { background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container); }
-.auth h2 { color: inherit; }
+.auth h2, .auth h3 { color: inherit; }
 .auth p { margin-top: 8px; }
 .backends { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.sign-in { margin-top: 16px; }
 .code {
   margin: 16px 0; padding: 12px 16px; border-radius: var(--md-sys-shape-corner-small);
   background: color-mix(in srgb, currentColor 10%, transparent);

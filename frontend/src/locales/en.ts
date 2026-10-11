@@ -76,13 +76,15 @@ export const en: Messages = {
   "stats.unknownKey": "Key unknown, not counted",
 
   "auth.title": "Sign-in is needed",
-  "auth.choose": "Choose where the music comes from",
+  "auth.titleSources": "Music sources",
+  "auth.choose": "Choose where the music comes from. Tracks of all the sources chosen are mixed.",
   "auth.backends": "Music service",
   "auth.open": "Open the sign-in page and enter this code. The radio starts by itself.",
   "auth.waiting": "Waiting for a code from the service…",
   "auth.link": "Open the sign-in page",
   "auth.fill": "Enter your details to sign in. The radio starts by itself.",
   "auth.submit": "Sign in",
+  "auth.resting": "not answering, the others play meanwhile",
 
   "toast.backendFailed": "Could not choose the music service: {reason}",
   "toast.signInFailed": "Could not sign in: {reason}",

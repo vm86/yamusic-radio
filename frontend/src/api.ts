@@ -46,16 +46,28 @@ export interface AuthField {
   secret: boolean;
 }
 
-export interface AuthInfo {
+/** One of the music services the radio can play from. */
+export interface BackendInfo {
+  id: string;
+  name: string;
+  /** The radio takes tracks from it (once it is signed in). */
+  enabled: boolean;
   authorized: boolean;
-  /** The backend chosen, null while none is. */
-  backend?: string | null;
-  /** The music services to choose from. */
-  backends?: { id: string; name: string }[];
+  /** Signed in and not resting after failures. */
+  available: boolean;
   /** Where to sign in, and the code to enter there, once the service gave them. */
   url: string | null;
   code: string | null;
   /** What to type to sign in, for a backend that asks for it. */
+  fields: AuthField[];
+}
+
+export interface AuthInfo {
+  /** At least one of the services that are on is signed in. */
+  authorized: boolean;
+  backends?: BackendInfo[];
+  url: string | null;
+  code: string | null;
   fields: AuthField[];
 }
 
@@ -101,8 +113,11 @@ function post<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   auth: () => request<AuthInfo>("api/auth"),
-  selectBackend: (backend: string) => put<AuthInfo>("api/auth/backend", { backend }),
-  signIn: (values: Record<string, string>) => post<AuthInfo>("api/auth", { values }),
+  enableBackend: (backend: string) => put<AuthInfo>("api/auth/backend", { backend }),
+  disableBackend: (backend: string) =>
+    request<AuthInfo>(`api/auth/backend/${encodeURIComponent(backend)}`, { method: "DELETE" }),
+  signIn: (backend: string, values: Record<string, string>) =>
+    post<AuthInfo>("api/auth", { backend, values }),
   queue: () => request<Queue>("api/queue"),
   stats: () => request<Stats>("api/stats"),
   genres: () => request<GenresInfo>("api/genres"),

@@ -3699,3 +3699,165 @@ async def test_the_mix_stands_while_paused_or_without_listeners(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+def lossless_hub() -> dj.Broadcaster:
+    return dj.Broadcaster(
+        bytes_per_second=dj.FLAC_BYTES_PER_SECOND,
+        frame_start=dj.flac_start,
+        header_length=dj.flac_header_length,
+    )
+
+
+def flac_bytes(seconds: float = 3.0) -> bytes:
+    """Encode a tone as ffmpeg does it for the lossless stream."""
+    t = np.arange(int(SR * seconds)) / SR
+    tone = (
+        0.3 * np.sin(2 * np.pi * 440 * t)[:, None] * np.ones((1, 2))
+    ).astype(np.float32)
+    done = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "f32le",
+            "-ac",
+            "2",
+            "-ar",
+            str(SR),
+            "-i",
+            "pipe:0",
+            *dj.FLAC_ARGS,
+            "-f",
+            "flac",
+            "pipe:1",
+        ],
+        input=tone.tobytes(),
+        capture_output=True,
+        check=True,
+    )
+    return done.stdout
+
+
+needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None, reason="no ffmpeg"
+)
+
+
+@needs_ffmpeg
+def test_flac_header_and_frames_are_found() -> None:
+    stream = flac_bytes()
+    length = dj.flac_header_length(stream)
+    assert length is not None
+    assert stream[:4] == b"fLaC"
+    assert dj.flac_start(stream[length:]) == 0  # the first frame follows it
+    # Not the whole of the header yet.
+    assert dj.flac_header_length(stream[: length - 1]) is None
+    assert dj.flac_header_length(stream[:2]) is None
+    with pytest.raises(ValueError, match="not a FLAC"):
+        dj.flac_header_length(b"OggS....")
+
+    # Cut anywhere: what is found is a frame, and the stream goes on from it
+    # to the end as a whole stream, which ffmpeg decodes without a complaint.
+    cut = stream[length + 5000 :]
+    start = dj.flac_start(cut)
+    assert 0 < start < len(cut)
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "flac",
+            "-i",
+            "pipe:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        input=stream[:length] + cut[start:],
+        capture_output=True,
+        check=True,
+    )
+    assert decoded.stderr == b""
+    assert dj.flac_start(b"\xff\xf8\x00") == 3  # not a whole header: no frame
+
+
+@needs_ffmpeg
+def test_a_lossless_listener_gets_the_header_first() -> None:
+    stream = flac_bytes()
+    length = dj.flac_header_length(stream)
+    assert length is not None
+    hub = lossless_hub()
+    hub.header = stream[:length]
+    for start in range(length, len(stream), 4096):
+        hub.publish(stream[start : start + 4096])
+
+    queue = hub.subscribe()
+
+    assert queue.get_nowait() == stream[:length]
+    first = queue.get_nowait()
+    assert dj.flac_start(first) == 0  # starts on a frame
+    assert len(first) <= dj.FLAC_BYTES_PER_SECOND * dj.PREROLL_SECONDS
+
+
+@needs_ffmpeg
+@pytest.mark.asyncio
+async def test_the_lossless_stream_is_served() -> None:
+    stream = flac_bytes()
+    length = dj.flac_header_length(stream)
+    assert length is not None
+    hub, flac = dj.Broadcaster(), lossless_hub()
+    flac.header = stream[:length]
+    flac.publish(stream[length:])
+    app = dj.make_app(hub, lossless=flac)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/stream.flac")
+        assert response.content_type == "audio/flac"
+        assert response.headers["Access-Control-Allow-Origin"] == "*"
+        body = await asyncio.wait_for(response.content.readexactly(9000), 2)
+        assert body.startswith(b"fLaC")
+        response.close()
+
+    # Without the lossless hub there is no such stream.
+    async with TestClient(TestServer(dj.make_app(dj.Broadcaster()))) as client:
+        assert (await client.get("/stream.flac")).status == 404
+
+
+@needs_ffmpeg
+@pytest.mark.asyncio
+async def test_the_mix_is_encoded_for_both_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def chunks(*_: object) -> AsyncIterator[tuple[np.ndarray, str]]:
+        for i in range(10_000):
+            tone = 0.2 * np.sin(np.arange(SR // 4) * 0.05 + i)
+            yield np.stack([tone, tone], axis=1).astype(np.float32), f"t{i}"
+
+    monkeypatch.setattr(dj, "mix", chunks)
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
+    hub, flac = dj.Broadcaster(), lossless_hub()
+    task = asyncio.create_task(
+        dj._encode_loop(radio, hub, 0.0, flac)  # noqa: SLF001
+    )
+    try:
+        await asyncio.sleep(0.3)
+        assert radio.pause_info()["pause_reason"] == "no_listeners"
+
+        # Only a lossless listener: the mix goes on for it, too.
+        queue = flac.subscribe()
+        first = await asyncio.wait_for(queue.get(), 5)
+        assert first[:4] == b"fLaC" or flac.header.startswith(b"fLaC")
+        await asyncio.wait_for(queue.get(), 5)
+        assert not radio.paused
+        assert flac.header.startswith(b"fLaC")
+        mp3 = hub.subscribe()
+        assert await asyncio.wait_for(mp3.get(), 5)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

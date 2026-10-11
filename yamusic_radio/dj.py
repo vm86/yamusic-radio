@@ -53,7 +53,12 @@ from yamusic_radio.dj_mix import (
 from yamusic_radio.multi import MultiBackend
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import (
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Iterable,
+    )
 
     import numpy.typing as npt
 
@@ -119,7 +124,8 @@ CHUNK_SECONDS = 0.25
 # How far ahead of the listeners the mix may run.
 PACING_LEAD_SECONDS = 2.0
 
-MP3_BITRATE = "192k"
+# The regular stream is HQ MP3; the lossless one is FLAC (16 bit, dithered).
+MP3_BITRATE = "320k"
 # A new listener gets this much of the latest audio at once, so that the
 # player has something to start on (browsers wait for ~1.5 s of audio before
 # they play) instead of waiting for it to arrive at the pace it plays.
@@ -128,6 +134,8 @@ MP3_BYTES_PER_SECOND = int(MP3_BITRATE.rstrip("k")) * 1000 // 8
 ICY_METAINT = 16000
 ICY_NAME = "Yandex Music DJ"
 CLIENT_QUEUE_SIZE = 256
+# What a second of FLAC takes about (it follows the music): sizes the preroll.
+FLAC_BYTES_PER_SECOND = 110_000
 
 
 def is_available() -> bool:
@@ -1632,17 +1640,106 @@ def mp3_start(data: bytes) -> int:
     return len(data)
 
 
+FLAC_MARKER = b"fLaC"
+FLAC_BLOCK_HEADER_SIZE = 4
+FLAC_LAST_BLOCK = 0x80
+FLAC_FRAME_SYNC = (0xFF, 0xF8)  # a fixed block size: what ffmpeg writes
+FLAC_FRAME_HEADER_MIN = 6
+FLAC_FRAME_HEADER_MAX = 16
+FLAC_UTF8_LEAD_MAX = 8
+FLAC_CRC8_POLYNOMIAL = 0x07
+
+
+def flac_header_length(data: bytes) -> int | None:
+    """Return how long the header (marker and metadata) of a FLAC stream is.
+
+    None if data doesn't hold the whole of it yet.
+    """
+    if not data.startswith(FLAC_MARKER[: len(data)]):
+        raise ValueError("not a FLAC stream")
+    place = len(FLAC_MARKER)
+    while place + FLAC_BLOCK_HEADER_SIZE <= len(data):
+        last = data[place] & FLAC_LAST_BLOCK
+        size = int.from_bytes(data[place + 1 : place + 4], "big")
+        place += FLAC_BLOCK_HEADER_SIZE + size
+        if last:
+            return place if place <= len(data) else None
+    return None
+
+
+def _crc8(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (
+                ((crc << 1) ^ FLAC_CRC8_POLYNOMIAL) & 0xFF
+                if crc & 0x80
+                else (crc << 1) & 0xFF
+            )
+    return crc
+
+
+def _flac_frame_header_length(data: bytes, place: int) -> int:
+    """Return the length of the frame header at place, 0 if it is not one."""
+    head = data[place : place + FLAC_FRAME_HEADER_MAX]
+    if len(head) < FLAC_FRAME_HEADER_MIN or head[3] & 1:  # reserved bit
+        return 0
+    block_code, rate_code = head[2] >> 4, head[2] & 0xF
+    # The frame number is UTF-8 coded: the leading ones give its length.
+    lead = 0
+    while lead < FLAC_UTF8_LEAD_MAX and head[4] & (0x80 >> lead):
+        lead += 1
+    if lead in {1, FLAC_UTF8_LEAD_MAX}:
+        return 0
+    size = 4 + max(lead, 1)
+    size += {6: 1, 7: 2}.get(block_code, 0)  # the block size follows
+    size += {12: 1, 13: 2, 14: 2}.get(rate_code, 0)  # so does the rate
+    return size + 1 if size + 1 <= len(head) else 0
+
+
+def flac_start(data: bytes) -> int:
+    """Return where the first whole FLAC frame in data starts.
+
+    A frame counts when the CRC-8 of its header is right (the sync pattern
+    may happen inside the audio). Returns len(data) if there is none.
+    """
+    place = data.find(bytes(FLAC_FRAME_SYNC))
+    while place != -1:
+        length = _flac_frame_header_length(data, place)
+        if (
+            length
+            and _crc8(data[place : place + length - 1])
+            == data[place + length - 1]
+        ):
+            return place
+        place = data.find(bytes(FLAC_FRAME_SYNC), place + 1)
+    return len(data)
+
+
 class Broadcaster:
     """Fans the encoded stream out to the connected listeners."""
 
-    def __init__(self, preroll_seconds: float = PREROLL_SECONDS) -> None:
+    def __init__(
+        self,
+        preroll_seconds: float = PREROLL_SECONDS,
+        *,
+        bytes_per_second: int = MP3_BYTES_PER_SECOND,
+        frame_start: Callable[[bytes], int] = mp3_start,
+        header_length: Callable[[bytes], int | None] | None = None,
+    ) -> None:
         self.title = ""
+        # A stream that starts with a header (FLAC) says how to tell its
+        # length; it is kept to be sent first to the listeners that join.
+        self.header = b""
+        self.header_length = header_length
+        self._frame_start = frame_start
         self._clients: set[Queue[bytes]] = set()
         self._first_listener = Event()
         # The latest audio, for the listeners that join.
         self._recent: deque[bytes] = deque()
         self._recent_size = 0
-        self._preroll = round(preroll_seconds * MP3_BYTES_PER_SECOND)
+        self._preroll = round(preroll_seconds * bytes_per_second)
 
     @property
     def has_listeners(self) -> bool:
@@ -1658,12 +1755,25 @@ class Broadcaster:
             self._first_listener.clear()
             await self._first_listener.wait()
 
+    async def wait_for_a_listener(self, *others: Broadcaster) -> None:
+        """Wait until this stream or any of the others has a listener."""
+        hubs = (self, *others)
+        while not any(hub.has_listeners for hub in hubs):
+            waits = [create_task(hub.wait_for_listeners()) for hub in hubs]
+            _, pending = await asyncio.wait(
+                waits, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+
     def subscribe(self) -> Queue[bytes]:
         """Join the stream; the latest seconds of it come at once."""
         queue: Queue[bytes] = Queue(CLIENT_QUEUE_SIZE)
+        if self.header:
+            queue.put_nowait(self.header)
         if self._recent:
             data = b"".join(self._recent)[-self._preroll :]
-            queue.put_nowait(data[mp3_start(data) :])
+            queue.put_nowait(data[self._frame_start(data) :])
         self._clients.add(queue)
         self._first_listener.set()
         return queue
@@ -1962,15 +2072,15 @@ def _add_web_page(app: web.Application) -> None:
         app.router.add_static("/assets", WEB_DIR / "assets")
 
 
-def make_app(
-    hub: Broadcaster,
-    radio: Radio | None = None,
-    backends: MultiBackend | None = None,
-) -> web.Application:
+def _stream_handler(
+    hub: Broadcaster, content_type: str, *, titles: bool
+) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
+    """Make the handler that streams a hub to a listener."""
+
     async def stream(request: web.Request) -> web.StreamResponse:
-        with_titles = request.headers.get("Icy-MetaData") == "1"
+        with_titles = titles and request.headers.get("Icy-MetaData") == "1"
         headers = {
-            "Content-Type": "audio/mpeg",
+            "Content-Type": content_type,
             "Cache-Control": "no-cache",
             "icy-name": ICY_NAME,
             # A page of another origin may analyze the audio: an <audio>
@@ -1983,7 +2093,7 @@ def make_app(
         await response.prepare(request)
 
         queue = hub.subscribe()
-        log.info("Listener connected: %s", request.remote)
+        log.info("Listener connected (%s): %s", content_type, request.remote)
         pending = bytearray()
         sent_title = None
         try:
@@ -2007,18 +2117,48 @@ def make_app(
             log.info("Listener gone: %s", request.remote)
         return response
 
+    return stream
+
+
+def make_app(
+    hub: Broadcaster,
+    radio: Radio | None = None,
+    backends: MultiBackend | None = None,
+    lossless: Broadcaster | None = None,
+) -> web.Application:
     app = web.Application()
-    app.router.add_get("/stream", stream)
+    app.router.add_get(
+        "/stream", _stream_handler(hub, "audio/mpeg", titles=True)
+    )
+    if lossless is not None:
+        app.router.add_get(
+            "/stream.flac",
+            _stream_handler(lossless, "audio/flac", titles=False),
+        )
     _add_web_page(app)
     if radio is not None:
         add_api(app, radio, backends)
     return app
 
 
-async def _encode_loop(
-    radio: DeckSource, hub: Broadcaster, effects: float
-) -> None:
-    """Mix, encode and publish in real time while somebody listens."""
+MP3_ARGS = ("-c:a", "libmp3lame", "-b:a", MP3_BITRATE, "-f", "mp3")
+# 16 bit with a triangular dither: what the CD does with a finer mix.
+FLAC_ARGS = (
+    "-af",
+    "aresample=dither_method=triangular",
+    "-sample_fmt",
+    "s16",
+    "-c:a",
+    "flac",
+    "-f",
+    "flac",
+)
+
+
+async def _start_encoder(
+    output_args: tuple[str, ...],
+) -> asyncio.subprocess.Process:
+    """Start ffmpeg: the mix in as raw float PCM, the encoded stream out."""
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-nostdin",
@@ -2032,62 +2172,120 @@ async def _encode_loop(
         str(SAMPLE_RATE),
         "-i",
         "pipe:0",
-        "-c:a",
-        "libmp3lame",
-        "-b:a",
-        MP3_BITRATE,
+        *output_args,
         "-flush_packets",
         "1",
-        "-f",
-        "mp3",
         "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
     )
     if proc.stdin is None or proc.stdout is None:
         raise RuntimeError("ffmpeg has no pipes")
-    stdout = proc.stdout
+    return proc
 
-    async def forward() -> None:
-        while chunk := await stdout.read(4096):
-            hub.publish(chunk)
 
-    forwarder = create_task(forward(), name="dj-forward")
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    produced = 0.0
-    try:
-        async for pcm, title in mix(radio, effects):
-            if radio.user_paused or not hub.has_listeners:
-                radio.hold(held=True)
-                while radio.user_paused or not hub.has_listeners:
-                    if radio.user_paused:
-                        await radio.wait_resumed()
-                    else:
-                        await hub.wait_for_listeners()
-                radio.hold(held=False)
-                started, produced = loop.time(), 0.0
-            hub.title = title
-            proc.stdin.write(np.ascontiguousarray(pcm).tobytes())
-            await proc.stdin.drain()
-            produced += len(pcm) / SAMPLE_RATE
-            ahead = produced - (loop.time() - started) - PACING_LEAD_SECONDS
-            if ahead > 0:
-                await sleep(ahead)
-    finally:
-        forwarder.cancel()
+async def _forward(stdout: asyncio.StreamReader, hub: Broadcaster) -> None:
+    """Publish what an encoder writes; a FLAC stream's header is kept apart."""
+    pending = b""
+    if hub.header_length is not None:
+        while (length := hub.header_length(pending)) is None:
+            chunk = await stdout.read(4096)
+            if not chunk:
+                return
+            pending += chunk
+        hub.header, pending = pending[:length], pending[length:]
+        if pending:
+            hub.publish(pending)
+    while chunk := await stdout.read(4096):
+        hub.publish(chunk)
+
+
+async def _start_encoders(
+    hub: Broadcaster, lossless: Broadcaster | None
+) -> list[tuple[asyncio.subprocess.Process, Broadcaster]]:
+    encoders = [(await _start_encoder(MP3_ARGS), hub)]
+    if lossless is not None:
+        try:
+            encoders.append((await _start_encoder(FLAC_ARGS), lossless))
+        except BaseException:
+            await _stop_encoders(encoders)
+            raise
+    return encoders
+
+
+async def _stop_encoders(
+    encoders: list[tuple[asyncio.subprocess.Process, Broadcaster]],
+) -> None:
+    for proc, _ in encoders:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()
 
 
+async def _hold(radio: DeckSource, hubs: list[Broadcaster]) -> bool:
+    """Wait while the mix is paused or nobody listens; say if it waited."""
+    held = False
+    while radio.user_paused or not any(h.has_listeners for h in hubs):
+        if not held:
+            radio.hold(held=True)
+            held = True
+        if radio.user_paused:
+            await radio.wait_resumed()
+        else:
+            await hubs[0].wait_for_a_listener(*hubs[1:])
+    if held:
+        radio.hold(held=False)
+    return held
+
+
+async def _encode_loop(
+    radio: DeckSource,
+    hub: Broadcaster,
+    effects: float,
+    lossless: Broadcaster | None = None,
+) -> None:
+    """Mix, encode and publish in real time while somebody listens."""
+    hubs = [hub] if lossless is None else [hub, lossless]
+    encoders = await _start_encoders(hub, lossless)
+    forwarders = [
+        create_task(_forward(proc.stdout, target), name="dj-forward")
+        for proc, target in encoders
+        if proc.stdout is not None
+    ]
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    produced = 0.0
+    try:
+        async for pcm, title in mix(radio, effects):
+            if await _hold(radio, hubs):
+                started, produced = loop.time(), 0.0
+            hub.title = title
+            data = np.ascontiguousarray(pcm).tobytes()
+            stdins = [p.stdin for p, _ in encoders if p.stdin is not None]
+            for stdin in stdins:
+                stdin.write(data)
+            for stdin in stdins:
+                await stdin.drain()
+            produced += len(pcm) / SAMPLE_RATE
+            ahead = produced - (loop.time() - started) - PACING_LEAD_SECONDS
+            if ahead > 0:
+                await sleep(ahead)
+    finally:
+        for forwarder in forwarders:
+            forwarder.cancel()
+        await _stop_encoders(encoders)
+
+
 async def encode_forever(
-    radio: DeckSource, hub: Broadcaster, effects: float
+    radio: DeckSource,
+    hub: Broadcaster,
+    effects: float,
+    lossless: Broadcaster | None = None,
 ) -> None:
     """Keep the mix going: a failure ends only the mix it happened in."""
     while True:
         try:
-            await _encode_loop(radio, hub, effects)
+            await _encode_loop(radio, hub, effects, lossless)
         except CancelledError:
             raise
         except Exception:
@@ -2147,17 +2345,28 @@ async def serve(
             cache=cache,
         )
         hub = Broadcaster()
+        lossless = Broadcaster(
+            bytes_per_second=FLAC_BYTES_PER_SECOND,
+            frame_start=flac_start,
+            header_length=flac_header_length,
+        )
         runner = web.AppRunner(
             make_app(
                 hub,
                 radio,
                 backend if isinstance(backend, MultiBackend) else None,
+                lossless,
             ),
             access_log=None,
         )
         await runner.setup()
         await web.TCPSite(runner, host, port).start()
-        log.info("Streaming at http://%s:%d/stream", host, port)
+        log.info(
+            "Streaming at http://%s:%d/stream (MP3 %s) and /stream.flac",
+            host,
+            port,
+            MP3_BITRATE,
+        )
         if ready is not None:
             ready.set()
         try:
@@ -2176,7 +2385,9 @@ async def serve(
             await _first_tracks(radio)
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
-                await encode_forever(radio, hub, EFFECT_LEVELS[effects])
+                await encode_forever(
+                    radio, hub, EFFECT_LEVELS[effects], lossless
+                )
             finally:
                 refill.cancel()
                 with contextlib.suppress(CancelledError):

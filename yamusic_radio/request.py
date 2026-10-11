@@ -18,6 +18,7 @@ from yandex_music.utils.request_async import (
     USER_AGENT,
     Request,
 )
+from yarl import URL
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -41,6 +42,11 @@ STATUS_ERRORS: dict[int, type[NetworkError | YandexMusicError]] = {
     413: NetworkError,
     429: RateLimitError,
 }
+
+
+def where(url: str) -> str:
+    """Return the address without its query: it holds signatures."""
+    return str(URL(url).with_query(None))
 
 
 async def retry_on_rate_limit[T](
@@ -94,9 +100,10 @@ class ClientRequest(Request):
                 resp = _resp
                 content = await resp.content.read()
         except TimeoutError as e:
+            log.warning("%s %s timed out", method, where(url))
             raise TimedOutError from e
         except ClientError as e:
-            raise NetworkError(e) from e
+            raise NetworkError(f"{method} {where(url)}: {e!r}") from e
 
         if resp.ok:
             return content

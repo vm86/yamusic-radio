@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import pytest
+from aiohttp import ClientSession, ServerDisconnectedError
+from yandex_music.exceptions import NetworkError
 
-from yamusic_radio.request import RateLimitError, retry_on_rate_limit
+from yamusic_radio.request import (
+    ClientRequest,
+    RateLimitError,
+    retry_on_rate_limit,
+    where,
+)
 
 
 class _Flaky:
@@ -33,3 +40,24 @@ async def test_retry_on_rate_limit_gives_up_after_all_delays() -> None:
         await retry_on_rate_limit(call, delays=(0.0, 0.0))
 
     assert call.calls == 3
+
+
+def test_where_drops_the_query() -> None:
+    url = "https://api.music.yandex.net/get-file-info?sign=secret&ts=1"
+
+    assert where(url) == "https://api.music.yandex.net/get-file-info"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_request_says_which_address_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def disconnect(*_args: object, **_kwargs: object) -> None:
+        raise ServerDisconnectedError
+
+    async with ClientSession() as session:
+        monkeypatch.setattr(session, "request", disconnect)
+        request = ClientRequest(session)
+
+        with pytest.raises(NetworkError, match=r"GET https://x\.example/a/b:"):
+            await request.get("https://x.example/a/b?sign=secret")

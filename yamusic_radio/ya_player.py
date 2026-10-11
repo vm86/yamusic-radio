@@ -27,7 +27,11 @@ from yandex_music.utils.sign_request import (
 )
 
 from yamusic_radio import backend
-from yamusic_radio.request import ClientRequest, retry_on_rate_limit
+from yamusic_radio.request import (
+    ClientRequest,
+    retry_on_rate_limit,
+    where,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -499,7 +503,12 @@ class YandexMusicPlayer(ClientAsync):
                     async for chunk in resp.content.iter_chunked(1 << 16):
                         out.write(chunk)
 
-        await retry_on_rate_limit(request)
+        try:
+            await retry_on_rate_limit(request)
+        except (ClientError, TimeoutError) as err:
+            raise backend.BackendError(
+                f"download of {track.track_id} from {where(links[0])}: {err!r}"
+            ) from err
 
     async def feedback_track(
         self,

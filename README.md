@@ -1,8 +1,10 @@
 # yamusic-radio
 
-Endless DJ radio from a Yandex Music station. Downloads tracks, beat-matches
-them (bass swap, three-band EQ blend, filter sweeps, optional effects) and streams one continuous
-MP3 over HTTP with ICY titles.
+Endless DJ radio from a music service. Takes tracks from a Yandex Music
+station (or from any other service you add as a [backend](#adding-a-music-backend),
+several at once), beat-matches them (bass swap, three-band EQ blend, filter
+sweeps, optional effects) and streams one continuous MP3 over HTTP with ICY
+titles.
 
 ## Run
 
@@ -10,14 +12,24 @@ Needs Python >= 3.12 and `ffmpeg` with libmp3lame in `PATH`.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[test,lint]"
-.venv/bin/yamusic-dj --wait --port 8000
+.venv/bin/yamusic-dj --wait --port 8000 --backend yandex
 .venv/bin/yamusic-dj --mood-arc --effects full --host 0.0.0.0
 # listen: http://127.0.0.1:8000/stream
 ```
 
-On the first run the URL and the code of the OAuth device flow are in the log
-and at `GET /api/auth` (the server is already up, so
-`curl -s localhost:8000/api/auth` works before anyone has logged in). The
+**Music backends.** The tracks come from the backends that are on; with
+several on, their tracks go into one pool and the radio picks the best fit
+among them. A backend is on when it is asked for (`--backend ID`, repeatable,
+or the page, or `PUT /api/auth/backend`), when it was on in the last run, or
+when it is already signed in (has a saved token). Until one is on the radio
+waits and the page offers them. Only `yandex` comes with the program. A backend
+that fails is left alone for a while (30 s, doubling up to 10 min) and the
+others carry on. `--station ID=STATION` (repeatable) picks the station of a
+backend; `--station STATION` is for the first one.
+
+On the first run of the Yandex backend the URL and the code of the OAuth
+device flow are in the log and at `GET /api/auth` (the server is already up,
+so `curl -s localhost:8000/api/auth` works before anyone has logged in). The
 token is stored, mode 0600, in `~/.config/yamusic-radio.json`
 (`--config` to change). The log is `~/.cache/yamusic_radio.log`
 (or `--debug` to stderr).
@@ -28,11 +40,13 @@ tracks or analyze known ones again. The genre of the track (from its album) is
 kept in the same table; the API does not show it. `--cache PATH` moves it, `--no-cache`
 turns it off.
 
-The moods and the genres that were picked are kept in the cache and picked
-again at the next start (not with `--no-cache`). The mood setting of the
-station on the Yandex account is put back when the radio stops; the original
-setting is kept in the cache for as long as the account has another one, so
-if the radio is killed the next run puts it back first.
+The moods, the genres and the backends that were picked are kept in the cache
+and picked again at the next start (not with `--no-cache`). A backend that
+steers its station by the mood (Yandex does) has the mood setting of the
+station on the account put back when the radio stops; the original setting is
+kept in the cache for as long as the account has another one, so if the radio
+is killed the next run puts it back first. For a backend that does not, the
+radio finds the mood of each track by its sound (energy and key).
 
 A new listener gets the latest 3 s of the stream at once (from a frame
 boundary), so the player can start at once instead of after the ~1.5 s that a
@@ -110,9 +124,12 @@ stay on neighbouring keys (a fifth of them would by chance).
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
 play/pause and volume, the current track with its progress, the previous and
-the next tracks, mood and genre chips, the transition statistics, and the
-authorization code while the app has no token. The theme is light, dark or
-the system's, set by the button in the top bar (each press: system, light, dark) and remembered.
+the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
+transition statistics, and the backends: which are on, the sign-in of each
+(the code of a device flow, or the fields it asks for). The theme is light,
+dark or the system's, set by the button in the top bar (each press: system,
+light, dark) and remembered. The page is in Russian or English, by the system
+language by default, and the button in the top bar changes it.
 
 It is a Vue 3 + TypeScript app in `frontend/`. The build goes into
 `yamusic_radio/web/` and **is committed**, so that the package, the RPM
@@ -142,8 +159,11 @@ Served next to the stream, no authentication.
 | `GET /api/stats/keys` | Every change of key there was, with how often: `session` and `all_time` (`null` without a cache), each a list of `{"from": "8A", "to": "9A", "relation", "quality", "count"}`, the most common first. A key that was not found is `null`. The page does not show it. |
 | `POST /api/next` | The next track now: it needs the next track to be ready, and the blend starts on the first bar line of the playing track at least 2 s ahead, as smooth as any other (16 beats; the tempo glides, bass swap / EQ blend / sweep). Answers 202 with the queue (`skip_pending: true` until the blend has begun), 409 if nothing plays yet or a transition is already under way. The station is told the track was skipped. |
 | `GET /api/transitions` | The last 10 blends, the newest last: `from`, `to`, `kind`, `effect`, `beat_matched`, `from_bpm`, `to_bpm`, `glide` (how far the tempo glided, `0.05` is 5% faster), `seconds`, `loudness_gap_db`, `key_relation`, `over_db` (how far above the limiter's ceiling the blend peaked before it was limited) and `at`. To look at a transition that did not sound right. |
-| `GET /api/auth` | `authorized`, and while the app has no token, the `url` to open and the `code` to enter there (both `null` once authorized, or until Yandex has given them). The server is up during authorization. |
-| `GET /api/moods` | `available` (`sad`, `calm`, `fun`, `active`), `selected`, and the `station` mood now. |
+| `GET /api/auth` | `authorized` (a backend can give tracks), and while it cannot, what to do to sign in: the `url` to open and the `code` to enter there (both `null` once authorized, or until the service has given them) and `fields` (`{"name", "label", "secret"}`: values to type, `[]` for a device flow). `backends` lists every backend with the same keys plus `id`, `name`, `enabled` and `available` (signed in and not resting after failures). The server is up during authorization. |
+| `POST /api/auth` `{"backend": "id", "values": {"login": "..."}}` | Sign in with the values of the `fields` of the backend (without `backend`, of the radio's own). Answers like `GET /api/auth`; 400 if the backend turns them down. |
+| `PUT /api/auth/backend` `{"backend": "id"}` | Turn the backend on; it starts signing in if it needs to. Answers like `GET /api/auth`; 400 for an unknown id. |
+| `DELETE /api/auth/backend/{id}` | Turn the backend off. The tracks it gave already stay in the pool. Answers like `GET /api/auth`; 404 for an unknown id. |
+| `GET /api/moods` | `available` (`sad`, `calm`, `fun`, `active`), `selected`, the `station` mood now and `steered` (whether the backends steer their stations by the mood; if not, the radio judges the tracks by their sound). |
 | `PUT /api/moods` `{"moods": ["calm", "fun"]}` | Play only these moods. |
 | `DELETE /api/moods` | Any mood again. |
 
@@ -156,7 +176,7 @@ the radio chooses, and the radio may change it, as it picks ~40 s before each
 blend.
 
 Choosing moods changes the mood setting of the station **on your Yandex
-account** while the radio runs (put back on exit or `DELETE`). The track that
+account** (of every backend that steers its station) while the radio runs (put back on exit or `DELETE`). The track that
 is already decoded keeps its mood; tracks of other moods in the pool are
 dropped and fetched anew.
 
@@ -164,6 +184,54 @@ dropped and fetched anew.
 curl -s localhost:8000/api/queue | jq .
 curl -s -X PUT localhost:8000/api/moods -d '{"moods":["calm","fun"]}'
 ```
+
+## Adding a music backend
+
+The DJ only talks to a `MusicBackend` (`yamusic_radio/backend.py`): it asks
+for batches of tracks from a "station", downloads them to files, and tells
+the backend what was heard. Yandex Music is one implementation
+(`ya_player.py`); a Subsonic server, a radio or a folder of files is another.
+
+1. **Write a class** with the methods of the `MusicBackend` protocol:
+
+   | Member | What it does |
+   |---|---|
+   | `authorized`, `auth_prompt`, `wait_authorized()` | Whether it can give tracks; what the user has to do to sign in (`AuthPrompt`: a `url` and a `code` of a device flow, and/or `fields` to type, each an `AuthField(name, label, secret)`); wait until it can. A backend that needs nothing is always `authorized`. |
+   | `start_auth()`, `authorize(values)` | Begin a sign-in that goes on by itself (a device flow); sign in with the typed values, raising `AuthError` if they are wrong or there is no such way. |
+   | `default_station` | The station to play when none is asked for (`--station`). |
+   | `station_batch(station, exclude_track_ids=...)` | The next `Track`s of the station, ready to download. May leave out the excluded ones, may repeat when it has nothing else. Raises `BackendError` when the service is down. |
+   | `download(track, path)` | Write the audio to `path`; raise if it cannot. |
+   | `feedback_track(track, Feedback.STARTED/FINISHED/SKIPPED, station, seconds)` | Tell the service what happened to the track (a no-op if it has no use for it). |
+   | `supports_moods`, `station_settings()`, `set_station_settings()` | Whether the service can steer a station by the mood. If not, return `False` (the other two are never called) and the radio judges each track by its sound. |
+   | `aclose()` | Stop what runs in the background. |
+
+   A `Track` has a `track_id` unique within the backend, a `title`, `artists`,
+   the `codec` (the file extension that ffmpeg is given: `mp3`, `flac`, ...)
+   and optionally `bitrate_in_kbps`, `genre`, a `cover` URL (with `%%` where
+   the size such as `400x400` goes) and a `mood` (one of `sad`, `calm`, `fun`,
+   `active`) when the service knows it. Raise only `BackendError` for what may
+   pass (the service is down): the other backends carry on. Anything else is a
+   bug and is not caught.
+
+2. **Register it** in `backend_specs()` in `yamusic_radio/main.py`, and add its
+   id to `BACKEND_IDS` (the choices of `--backend` and `--station`):
+
+   ```python
+   BackendSpec(
+       "subsonic",                       # the id
+       "Subsonic",                       # the name on the page
+       lambda: SubsonicBackend(options.subsonic_url, session),
+       lambda: bool(options.subsonic_url),  # configured: on without being asked
+   )
+   ```
+
+   The track ids are stored as `<id>:<track_id>` in the cache and the API, so
+   that ids of different backends never meet; `plain_ids=True` leaves them as
+   they are (only for a backend whose ids were already in the cache).
+
+3. **Test it** the way `tests/test_dj.py` does: a small fake backend, no network.
+   The page needs no change: the backends, their sign-in fields and codes come
+   from `GET /api/auth`.
 
 ## Development
 

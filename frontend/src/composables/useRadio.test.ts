@@ -51,7 +51,7 @@ async function settle(): Promise<void> {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  api.auth.mockResolvedValue({ authorized: true, url: null, code: null });
+  api.auth.mockResolvedValue({ authorized: true, url: null, code: null, fields: [] });
   api.queue.mockImplementation(async () => queueOf(moodsOf([])));
   api.stats.mockResolvedValue({ session: { total: 0 }, all_time: null });
   api.genres.mockResolvedValue({ available: [], selected: [], applied: [] });

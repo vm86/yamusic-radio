@@ -21,7 +21,13 @@ const player = usePlayer(radio.now);
   <AppBar :playing="player.playing.value" />
 
   <main>
-    <AuthCard v-if="radio.auth.value && !radio.auth.value.authorized" :auth="radio.auth.value" class="auth-wide" />
+    <AuthCard
+      v-if="radio.auth.value && !radio.auth.value.authorized"
+      :auth="radio.auth.value"
+      class="auth-wide"
+      @select="radio.selectBackend"
+      @sign-in="radio.signIn"
+    />
 
     <div class="column">
       <PlayerCard

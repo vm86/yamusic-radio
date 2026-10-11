@@ -40,10 +40,23 @@ export interface Queue {
   skip_pending: boolean;
 }
 
+export interface AuthField {
+  name: string;
+  label: string;
+  secret: boolean;
+}
+
 export interface AuthInfo {
   authorized: boolean;
+  /** The backend chosen, null while none is. */
+  backend?: string | null;
+  /** The music services to choose from. */
+  backends?: { id: string; name: string }[];
+  /** Where to sign in, and the code to enter there, once the service gave them. */
   url: string | null;
   code: string | null;
+  /** What to type to sign in, for a backend that asks for it. */
+  fields: AuthField[];
 }
 
 export interface TransitionData {
@@ -78,8 +91,18 @@ function put<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+function post<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export const api = {
   auth: () => request<AuthInfo>("api/auth"),
+  selectBackend: (backend: string) => put<AuthInfo>("api/auth/backend", { backend }),
+  signIn: (values: Record<string, string>) => post<AuthInfo>("api/auth", { values }),
   queue: () => request<Queue>("api/queue"),
   stats: () => request<Stats>("api/stats"),
   genres: () => request<GenresInfo>("api/genres"),

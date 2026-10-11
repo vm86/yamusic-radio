@@ -107,6 +107,22 @@ export function useRadio() {
     () => pendingMoods.value ?? moods.value?.selected ?? [],
   );
 
+  async function selectBackend(id: string): Promise<void> {
+    try {
+      auth.value = await api.selectBackend(id);
+    } catch (error) {
+      toast(t("toast.backendFailed", { reason: (error as Error).message }));
+    }
+  }
+
+  async function signIn(values: Record<string, string>): Promise<void> {
+    try {
+      auth.value = await api.signIn(values);
+    } catch (error) {
+      toast(t("toast.signInFailed", { reason: (error as Error).message }));
+    }
+  }
+
   async function setGenres(list: string[]): Promise<void> {
     try {
       genres.value = await api.setGenres(list);
@@ -198,6 +214,8 @@ export function useRadio() {
     busy,
     refreshing,
     setMoods,
+    selectBackend,
+    signIn,
     setGenres,
     setBlockedGenres,
     refreshQueue,

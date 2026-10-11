@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import logging
 import shutil
@@ -42,13 +43,14 @@ import numpy as np
 from aiohttp import web
 
 from yamusic_radio import dj_mix
-from yamusic_radio.backend import Feedback
+from yamusic_radio.backend import AuthError, Feedback
 from yamusic_radio.dj_mix import (
     CHANNELS,
     SAMPLE_RATE,
     Pcm,
     TrackAnalysis,
 )
+from yamusic_radio.selector import BackendSelector
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
@@ -60,7 +62,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-DEFAULT_STATION = "user:onyourwave"
 DEFAULT_PORT = 8000
 DEFAULT_POOL_SIZE = 12
 EFFECT_LEVELS = {"off": 0.0, "light": 0.6, "full": 1.0}
@@ -312,7 +313,7 @@ class Radio:
         backend: MusicBackend,
         workdir: Path,
         *,
-        station_id: str = DEFAULT_STATION,
+        station_id: str = "",
         pool_size: int = DEFAULT_POOL_SIZE,
         mood_arc: bool = False,
         cache: TrackCache | None = None,
@@ -321,7 +322,7 @@ class Radio:
         self._backend = backend
         self._cache = cache
         self._workdir = workdir
-        self._station_id = station_id
+        self._station = station_id
         self._pool_size = pool_size
         self._pool: list[Candidate] = []
         # Artists of the tracks played so far, and how many there were.
@@ -409,12 +410,12 @@ class Radio:
         if not self._backend.supports_moods:
             return
         self._saved_settings = await self._backend.station_settings(
-            self._station_id
+            self.station_id
         )
         self._mood = self._saved_settings[0]
         self._remember(
             SETTING_STATION,
-            {"station": self._station_id, "settings": self._saved_settings},
+            {"station": self.station_id, "settings": self._saved_settings},
         )
 
     async def restore_settings(self) -> None:
@@ -423,7 +424,7 @@ class Radio:
             return
         if self._mood != self._saved_settings[0]:
             await self._backend.set_station_settings(
-                self._station_id, *self._saved_settings
+                self.station_id, *self._saved_settings
             )
             self._mood = self._saved_settings[0]
         self._forget(SETTING_STATION)
@@ -473,13 +474,26 @@ class Radio:
     def authorized(self) -> bool:
         return self._backend.authorized
 
+    async def authorize(self, values: dict[str, str]) -> None:
+        """Sign in to the backend with what the user typed."""
+        await self._backend.authorize(values)
+
+    @property
+    def station_id(self) -> str:
+        """The station asked for, else the one the backend starts with."""
+        return self._station or self._backend.default_station
+
     def auth_info(self) -> dict[str, object]:
-        """Where to authorize the app, while it has no token yet."""
+        """Return what to do to authorize the app, while it isn't."""
         authorized = self.authorized
+        prompt = self._backend.auth_prompt
         return {
             "authorized": authorized,
-            "url": None if authorized else self._backend.auth_url,
-            "code": None if authorized else self._backend.auth_code,
+            "url": None if authorized else prompt.url,
+            "code": None if authorized else prompt.code,
+            "fields": []
+            if authorized
+            else [dataclasses.asdict(f) for f in prompt.fields],
         }
 
     @property
@@ -733,7 +747,7 @@ class Radio:
             return
         _, diversity, language = self._saved_settings
         await self._backend.set_station_settings(
-            self._station_id, mood, diversity, language
+            self.station_id, mood, diversity, language
         )
         self._mood = mood
 
@@ -768,7 +782,7 @@ class Radio:
             off_mood_batches = 0
             while (wanted := count - (len(self._pool) - before)) > 0:
                 batch = await self._backend.station_batch(
-                    self._station_id,
+                    self.station_id,
                     exclude_track_ids=self._seen | self._off_genre,
                 )
                 fresh = [
@@ -1146,7 +1160,7 @@ class Radio:
         if track is None:
             return
         task = create_task(
-            self._backend.feedback_track(track, kind, self._station_id, seconds)
+            self._backend.feedback_track(track, kind, self.station_id, seconds)
         )
         self._feedback_tasks.add(task)
         task.add_done_callback(self._feedback_tasks.discard)
@@ -1683,8 +1697,78 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
     app.router.add_post("/api/next", next_track)
 
 
-def add_api(app: web.Application, radio: Radio) -> None:
+def _auth_info(
+    radio: Radio, selector: BackendSelector | None
+) -> dict[str, object]:
+    info = radio.auth_info()
+    if selector is not None:
+        info["backend"] = selector.selected
+        info["backends"] = [
+            {"id": backend_id, "name": name}
+            for backend_id, name in selector.choices
+        ]
+    return info
+
+
+def _add_backend_api(
+    app: web.Application,
+    radio: Radio,
+    selector: BackendSelector | None,
+) -> None:
+    async def choose_backend(request: web.Request) -> web.Response:
+        if selector is None:
+            raise web.HTTPNotFound(text="the backend is not selectable")
+        body = await _json_body(request)
+        chosen = body.get("backend") if isinstance(body, dict) else None
+        if not isinstance(chosen, str):
+            raise web.HTTPBadRequest(text='expected {"backend": "..."}')
+        try:
+            await selector.select(chosen)
+        except ValueError as err:
+            raise web.HTTPBadRequest(text=str(err)) from err
+        except AuthError as err:
+            raise web.HTTPConflict(text=str(err)) from err
+        return web.json_response(_auth_info(radio, selector))
+
+    app.router.add_put("/api/auth/backend", choose_backend)
+
+
+def _add_auth_api(
+    app: web.Application,
+    radio: Radio,
+    selector: BackendSelector | None,
+) -> None:
+    _add_backend_api(app, radio, selector)
+
+    async def auth(_: web.Request) -> web.Response:
+        return web.json_response(_auth_info(radio, selector))
+
+    async def sign_in(request: web.Request) -> web.Response:
+        body = await _json_body(request)
+        values = body.get("values") if isinstance(body, dict) else None
+        if not isinstance(values, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in values.items()
+        ):
+            raise web.HTTPBadRequest(text='expected {"values": {...}}')
+        try:
+            await radio.authorize(values)
+        except AuthError as err:
+            raise web.HTTPBadRequest(text=str(err)) from err
+        except RuntimeError as err:  # no backend is chosen
+            raise web.HTTPConflict(text=str(err)) from err
+        return web.json_response(_auth_info(radio, selector))
+
+    app.router.add_get("/api/auth", auth)
+    app.router.add_post("/api/auth", sign_in)
+
+
+def add_api(
+    app: web.Application,
+    radio: Radio,
+    selector: BackendSelector | None = None,
+) -> None:
     """Add the REST API to the app, under /api."""
+    _add_auth_api(app, radio, selector)
 
     async def queue(request: web.Request) -> web.Response:
         return web.json_response(
@@ -1692,9 +1776,6 @@ def add_api(app: web.Application, radio: Radio) -> None:
                 _count(request, "previous", 2), _count(request, "next", 15)
             )
         )
-
-    async def auth(_: web.Request) -> web.Response:
-        return web.json_response(radio.auth_info())
 
     def need_token() -> None:
         # The moods are a setting of the account at the backend.
@@ -1715,7 +1796,6 @@ def add_api(app: web.Application, radio: Radio) -> None:
         await radio.set_allowed_moods([])
         return web.json_response(radio.moods_info())
 
-    app.router.add_get("/api/auth", auth)
     app.router.add_get("/api/queue", queue)
     app.router.add_get("/api/moods", get_moods)
     app.router.add_put("/api/moods", put_moods)
@@ -1742,7 +1822,11 @@ def _add_web_page(app: web.Application) -> None:
         app.router.add_static("/assets", WEB_DIR / "assets")
 
 
-def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
+def make_app(
+    hub: Broadcaster,
+    radio: Radio | None = None,
+    selector: BackendSelector | None = None,
+) -> web.Application:
     async def stream(request: web.Request) -> web.StreamResponse:
         with_titles = request.headers.get("Icy-MetaData") == "1"
         headers = {
@@ -1784,7 +1868,7 @@ def make_app(hub: Broadcaster, radio: Radio | None = None) -> web.Application:
     app.router.add_get("/stream", stream)
     _add_web_page(app)
     if radio is not None:
-        add_api(app, radio)
+        add_api(app, radio, selector)
     return app
 
 
@@ -1869,7 +1953,7 @@ async def serve(
     *,
     host: str,
     port: int,
-    station_id: str = DEFAULT_STATION,
+    station_id: str = "",
     pool_size: int = DEFAULT_POOL_SIZE,
     effects: str = DEFAULT_EFFECTS,
     mood_arc: bool = False,
@@ -1891,7 +1975,14 @@ async def serve(
             cache=cache,
         )
         hub = Broadcaster()
-        runner = web.AppRunner(make_app(hub, radio), access_log=None)
+        runner = web.AppRunner(
+            make_app(
+                hub,
+                radio,
+                backend if isinstance(backend, BackendSelector) else None,
+            ),
+            access_log=None,
+        )
         await runner.setup()
         await web.TCPSite(runner, host, port).start()
         log.info("Streaming at http://%s:%d/stream", host, port)
@@ -1908,7 +1999,9 @@ async def serve(
                 log.exception("Could not take up the picks of the last run")
             if mood_arc and radio.mood_arc_saved is None:
                 await radio.start_mood_arc()
-            log.info("Preparing %d tracks from %s...", pool_size, station_id)
+            log.info(
+                "Preparing %d tracks from %s...", pool_size, radio.station_id
+            )
             await radio.fill()
             if not radio.pool:
                 raise RuntimeError("The station gave no playable tracks")

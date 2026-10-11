@@ -20,7 +20,16 @@ if TYPE_CHECKING:
 np = pytest.importorskip("numpy")
 
 from yamusic_radio import dj, dj_mix  # noqa: E402
-from yamusic_radio.backend import Feedback  # noqa: E402
+from yamusic_radio.backend import (  # noqa: E402
+    AuthError,
+    AuthField,
+    AuthPrompt,
+    Feedback,
+)
+from yamusic_radio.selector import (  # noqa: E402
+    BackendSelector,
+    BackendSpec,
+)
 
 SR = dj_mix.SAMPLE_RATE
 
@@ -649,6 +658,7 @@ class FakeBackend:
     """A station that gives out the batches it is told to."""
 
     supports_moods = True
+    default_station = "station"
 
     def __init__(self, batches: list[list[FakeTrack]]) -> None:
         self.batches = batches
@@ -656,8 +666,9 @@ class FakeBackend:
         self.feedback: list[tuple[str, str, float]] = []
         self.settings: list[tuple[str, str, str]] = []
         self.authorized = True
-        self.auth_url: str | None = None
-        self.auth_code: str | None = None
+        self.auth_prompt = AuthPrompt()
+        self.auth_started = False
+        self.signed_in: list[dict[str, str]] = []
 
     async def station_batch(
         self, station_id: str, *, exclude_track_ids: set[str]
@@ -686,6 +697,15 @@ class FakeBackend:
         seconds: float,
     ) -> None:
         self.feedback.append((track.track_id, feedback, seconds))
+
+    def start_auth(self) -> None:
+        self.auth_started = True
+
+    async def authorize(self, values: dict[str, str]) -> None:
+        if values.get("password") != "right":
+            raise AuthError("wrong password")
+        self.signed_in.append(values)
+        self.authorized = True
 
     async def aclose(self) -> None:
         return None
@@ -1088,10 +1108,16 @@ async def test_api_tells_where_to_authorize(
 
     async with TestClient(TestServer(app)) as client:
         waiting = await (await client.get("/api/auth")).json()
-        assert waiting == {"authorized": False, "url": None, "code": None}
+        assert waiting == {
+            "authorized": False,
+            "url": None,
+            "code": None,
+            "fields": [],
+        }
 
-        backend.auth_url = "https://ya.example/device"
-        backend.auth_code = "ABCD1234"
+        backend.auth_prompt = AuthPrompt(
+            "https://ya.example/device", "ABCD1234"
+        )
         waiting = await (await client.get("/api/auth")).json()
         assert waiting["url"] == "https://ya.example/device"
         assert waiting["code"] == "ABCD1234"
@@ -1103,7 +1129,12 @@ async def test_api_tells_where_to_authorize(
 
         backend.authorized = True
         done = await (await client.get("/api/auth")).json()
-        assert done == {"authorized": True, "url": None, "code": None}
+        assert done == {
+            "authorized": True,
+            "url": None,
+            "code": None,
+            "fields": [],
+        }
 
 
 def chord_track(tonic: int, *, minor: bool, seconds: float = 40) -> np.ndarray:
@@ -2932,7 +2963,7 @@ async def test_settings_that_could_not_be_put_back_are_tried_again_next_time(
 ) -> None:
     track_cache.put_setting(
         "station_settings",
-        {"station": "user:onyourwave", "settings": ["all", "default", "any"]},
+        {"station": "station", "settings": ["all", "default", "any"]},
     )
     radio, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
 
@@ -2961,7 +2992,7 @@ async def test_a_damaged_setting_does_not_stop_the_radio(
     assert radio.genres_info()["selected"] == []
     # The damaged one was given up on; applying the moods saved a good one.
     assert track_cache.get_setting("station_settings") == {
-        "station": "user:onyourwave",
+        "station": "station",
         "settings": ["all", "default", "any"],
     }
 
@@ -3122,3 +3153,108 @@ async def test_the_mood_the_backend_gives_wins_over_the_sound(
     await radio._prepare(FakeTrack("a", mood="sad"))
 
     assert [c.mood for c in radio.pool] == ["sad"]
+
+
+def specs(made: dict[str, FakeBackend]) -> list[BackendSpec]:
+    def spec(spec_id: str, *, configured: bool = False) -> BackendSpec:
+        def create() -> FakeBackend:
+            backend = FakeBackend([])
+            backend.authorized = configured
+            made[spec_id] = backend
+            return backend
+
+        return BackendSpec(spec_id, spec_id.title(), create, lambda: configured)
+
+    return [spec("one"), spec("two", configured=True)]
+
+
+def test_the_backend_of_the_last_run_or_a_signed_in_one_is_taken() -> None:
+    made: dict[str, FakeBackend] = {}
+
+    assert BackendSelector(specs(made), initial="one").selected == "one"
+    assert made["one"].auth_started  # not signed in: the sign-in begins
+    assert BackendSelector(specs(made)).selected == "two"
+    assert BackendSelector(specs(made), initial="gone").selected == "two"
+    assert not made["two"].auth_started  # signed in already
+
+
+def test_nothing_is_chosen_while_no_backend_is_signed_in() -> None:
+    selector = BackendSelector([specs({})[0]])
+
+    assert selector.selected is None
+    assert not selector.authorized
+    assert selector.auth_prompt == AuthPrompt()
+    assert selector.default_station == ""
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_backend_swaps_it_until_one_is_signed_in() -> None:
+    made: dict[str, FakeBackend] = {}
+    kept: list[str] = []
+    selector = BackendSelector(
+        specs(made),
+        initial="one",
+        on_select=kept.append,
+    )
+    first = made["one"]
+
+    await selector.select("one")  # already so
+    assert kept == []
+    with pytest.raises(ValueError, match="unknown"):
+        await selector.select("gone")
+    await selector.select("two")
+
+    assert kept == ["two"]
+    assert selector.selected == "two"
+    assert selector.authorized
+    assert selector.default_station == "station"
+    assert first is not made["two"]
+    with pytest.raises(AuthError):
+        await selector.select("one")  # signed in: no going back
+
+
+@pytest.mark.asyncio
+async def test_api_chooses_the_backend_and_signs_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
+
+    made: dict[str, FakeBackend] = {}
+    selector = BackendSelector(specs(made)[:1])
+    radio = make_radio(tmp_path, monkeypatch, selector, {})  # type: ignore[arg-type]
+    app = dj.make_app(dj.Broadcaster(), radio, selector)
+
+    async with TestClient(TestServer(app)) as client:
+        info = await (await client.get("/api/auth")).json()
+        assert info["backend"] is None
+        assert info["backends"] == [{"id": "one", "name": "One"}]
+        reply = await client.post("/api/auth", json={"values": {}})
+        assert reply.status == 409  # nothing to sign in to yet
+
+        assert (await client.put("/api/auth/backend", json={})).status == 400
+        bad = await client.put("/api/auth/backend", json={"backend": "gone"})
+        assert bad.status == 400
+        info = await (
+            await client.put("/api/auth/backend", json={"backend": "one"})
+        ).json()
+        assert info["backend"] == "one"
+        assert made["one"].auth_started
+
+        made["one"].auth_prompt = AuthPrompt(
+            fields=(AuthField("password", "Password", secret=True),)
+        )
+        info = await (await client.get("/api/auth")).json()
+        assert info["fields"] == [
+            {"name": "password", "label": "Password", "secret": True}
+        ]
+        wrong = await client.post(
+            "/api/auth", json={"values": {"password": "x"}}
+        )
+        assert wrong.status == 400
+        assert (
+            await client.post("/api/auth", json={"values": 1})
+        ).status == 400
+        right = await client.post(
+            "/api/auth", json={"values": {"password": "right"}}
+        )
+        assert (await right.json())["authorized"] is True

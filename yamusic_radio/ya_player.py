@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import uuid
-from asyncio import CancelledError, Semaphore, gather, sleep
+from asyncio import CancelledError, Semaphore, Task, gather, sleep
 from asyncio.tasks import create_task
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 CODECS = "flac,aac,he-aac,mp3"
 # Only the owner may read the settings: they hold the OAuth token.
 SETTINGS_MODE = 0o600
+# "My wave".
+DEFAULT_STATION = "user:onyourwave"
 LOSSLESS_CODECS = "flac,flac-mp4,aac,aac-mp4,he-aac,he-aac-mp4,mp3"
 
 
@@ -132,6 +134,14 @@ FEEDBACK_TYPES = {
 }
 
 
+def has_token(settings_path: Path) -> bool:
+    """Say whether the settings file already holds an OAuth token."""
+    try:
+        return bool(json.loads(settings_path.read_text()).get("token"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 class YandexMusicPlayer(ClientAsync):
     """The Yandex Music implementation of `backend.MusicBackend`."""
 
@@ -173,12 +183,7 @@ class YandexMusicPlayer(ClientAsync):
             request=ClientRequest(client_session),
         )
 
-        self.__init_task = None
-        if not self.__settings["token"]:
-            self.__init_task = create_task(
-                self._init_token(),
-                name="init-token",
-            )
+        self.__init_task: Task[None] | None = None
 
     def _on_device_code(self, code: DeviceCode) -> None:
         self.__auth_url = code.verification_url
@@ -220,15 +225,23 @@ class YandexMusicPlayer(ClientAsync):
         with suppress(CancelledError):
             await init_task
 
-    @property
-    def auth_url(self) -> str | None:
-        """Auth page URL, while there's no token yet."""
-        return self.__auth_url
+    def start_auth(self) -> None:
+        """Ask Yandex for a code to enter on its page, until it is entered."""
+        if self.authorized or self.__init_task is not None:
+            return
+        self.__init_task = create_task(self._init_token(), name="init-token")
+
+    async def authorize(self, values: dict[str, str]) -> None:  # noqa: ARG002
+        raise backend.AuthError("Yandex signs in by the code on its page")
 
     @property
-    def auth_code(self) -> str | None:
-        """Code for manual entry on the auth page."""
-        return self.__user_code
+    def auth_prompt(self) -> backend.AuthPrompt:
+        """The auth page and the code for it, while there's no token yet."""
+        return backend.AuthPrompt(self.__auth_url, self.__user_code)
+
+    @property
+    def default_station(self) -> str:
+        return DEFAULT_STATION
 
     def save_settings(self) -> None:
         """Write the settings, which hold the token, for the owner only."""

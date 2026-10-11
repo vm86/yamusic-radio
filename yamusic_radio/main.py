@@ -9,22 +9,23 @@ import socket
 from argparse import ArgumentParser, Namespace
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from aiohttp import ClientSession, ClientTimeout
 
 from yamusic_radio import dj
 from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
-from yamusic_radio.ya_player import YandexMusicPlayer
-
-if TYPE_CHECKING:
-    from yamusic_radio.backend import MusicBackend
+from yamusic_radio.selector import BackendSelector, BackendSpec
+from yamusic_radio.ya_player import YandexMusicPlayer, has_token
 
 faulthandler.enable()
 log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = Path.home() / ".config/yamusic-radio.json"
 DEFAULT_LOG = Path.home() / ".cache/yamusic_radio.log"
+# The ids of backend_specs(), for the command line.
+BACKEND_IDS = ("yandex",)
+# The cache setting that keeps the backend of the last run.
+SETTING_BACKEND = "backend"
 
 
 def init_logging(*, debug: bool, systemd_run: bool) -> None:
@@ -83,7 +84,15 @@ def parse_args() -> Namespace:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
-        help="Settings file with the Yandex OAuth token",
+        help="Settings file with the Yandex OAuth token (Yandex backend)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_IDS,
+        help=(
+            "Music backend. By default the one of the last run, or the "
+            "first that is signed in; if none is, the page asks"
+        ),
     )
     parser.add_argument(
         "--host",
@@ -104,8 +113,11 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--station",
-        default="user:onyourwave",
-        help="Station the radio takes its tracks from",
+        default="",
+        help=(
+            "Station the radio takes its tracks from "
+            "(the backend's own by default)"
+        ),
     )
     parser.add_argument(
         "--effects",
@@ -147,13 +159,22 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
-def create_backend(options: Namespace, session: ClientSession) -> MusicBackend:
-    """Make the music service the radio takes its tracks from.
+def backend_specs(
+    options: Namespace, session: ClientSession
+) -> list[BackendSpec]:
+    """List the music services the radio can take its tracks from.
 
     The one place to change to play from another service or from a local
-    collection: return any `MusicBackend`.
+    collection: add a `BackendSpec` that makes any `MusicBackend`.
     """
-    return YandexMusicPlayer(options.config, session)
+    return [
+        BackendSpec(
+            "yandex",
+            "Yandex Music",
+            lambda: YandexMusicPlayer(options.config, session),
+            lambda: has_token(options.config),
+        ),
+    ]
 
 
 async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
@@ -161,8 +182,18 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
         raise_for_status=False,
         timeout=ClientTimeout(sock_read=10, sock_connect=5),
     )
-    backend = create_backend(options, session)
     cache = None if options.no_cache else TrackCache(options.cache)
+    # What the last run was using, unless the command line says otherwise.
+    last = cache.get_setting(SETTING_BACKEND) if cache is not None else None
+    backend = BackendSelector(
+        backend_specs(options, session),
+        initial=options.backend or (last if isinstance(last, str) else None),
+        on_select=(
+            None
+            if cache is None
+            else lambda chosen: cache.put_setting(SETTING_BACKEND, chosen)
+        ),
+    )
     ready = asyncio.Event()
     serve_task = asyncio.create_task(
         dj.serve(

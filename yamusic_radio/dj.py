@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import dataclasses
 import functools
+import json
 import logging
 import shutil
 import tempfile
@@ -51,6 +52,11 @@ from yamusic_radio.dj_mix import (
     TrackAnalysis,
 )
 from yamusic_radio.multi import MultiBackend
+from yamusic_radio.spectrum import (
+    SpectrumAnalyzer,
+    SpectrumFeed,
+    StartPositions,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -136,6 +142,20 @@ ICY_NAME = "Yandex Music DJ"
 CLIENT_QUEUE_SIZE = 256
 # What a second of FLAC takes about (it follows the music): sizes the preroll.
 FLAC_BYTES_PER_SECOND = 110_000
+# The rate of a stream is taken from at least this much of it.
+MIN_RATE_SPAN_SECONDS = 1.0
+# How far what an encoder has written is behind what it was fed (its own
+# delay, and a frame that waits to be filled), measured by decoding the
+# streams and looking for clicks of a known position. A FLAC frame waits
+# for 93 ms, so the lag of it is 0-93 ms.
+MP3_LAG_SECONDS = 0.136
+FLAC_LAG_SECONDS = 0.077
+# How long the spectrum waits for the stream of a page to connect, how far
+# before the start of it the frames begin, and how often a quiet connection
+# is asked if it is there.
+SPECTRUM_START_WAIT = 5.0
+SPECTRUM_BACKLOG_MARGIN = 0.5
+SPECTRUM_KEEPALIVE_SECONDS = 15.0
 
 
 def is_available() -> bool:
@@ -1727,6 +1747,7 @@ class Broadcaster:
         bytes_per_second: int = MP3_BYTES_PER_SECOND,
         frame_start: Callable[[bytes], int] = mp3_start,
         header_length: Callable[[bytes], int | None] | None = None,
+        lag_seconds: float = MP3_LAG_SECONDS,
     ) -> None:
         self.title = ""
         # A stream that starts with a header (FLAC) says how to tell its
@@ -1740,6 +1761,19 @@ class Broadcaster:
         self._recent: deque[bytes] = deque()
         self._recent_size = 0
         self._preroll = round(preroll_seconds * bytes_per_second)
+        self._bytes_per_second = bytes_per_second
+        self._lag = lag_seconds
+        # Where in the mix the stream is: the seconds of it that were fed to
+        # the encoder (set by whoever feeds it) and, for each recent chunk,
+        # the bytes published up to its end and the seconds then.
+        self.fed = 0.0
+        self._total = 0
+        self._marks: deque[tuple[int, float]] = deque()
+
+    def reset_position(self) -> None:
+        """Forget where the stream was: the mix starts over."""
+        self.fed = 0.0
+        self._marks.clear()
 
     @property
     def has_listeners(self) -> bool:
@@ -1766,17 +1800,44 @@ class Broadcaster:
             for task in pending:
                 task.cancel()
 
+    def position_of(self, offset: int) -> float | None:
+        """Return the position in the mix of a byte of the stream.
+
+        The end of what was published is where the mix was fed to; the
+        bytes before it take as long as the stream takes per byte lately (a
+        FLAC stream follows the music, so it is not the nominal rate). None
+        if nothing was published.
+        """
+        if not self._marks:
+            return None
+        end, seconds = self._marks[-1]
+        first_end, first_seconds = self._marks[0]
+        lately = seconds - first_seconds
+        rate = (
+            (end - first_end) / lately
+            if lately >= MIN_RATE_SPAN_SECONDS and end > first_end
+            else self._bytes_per_second
+        )
+        return seconds - self._lag - (end - offset) / rate
+
     def subscribe(self) -> Queue[bytes]:
         """Join the stream; the latest seconds of it come at once."""
+        return self.subscribe_at()[0]
+
+    def subscribe_at(self) -> tuple[Queue[bytes], float | None]:
+        """Join the stream, and say where in the mix it starts for you."""
         queue: Queue[bytes] = Queue(CLIENT_QUEUE_SIZE)
         if self.header:
             queue.put_nowait(self.header)
+        position = None
         if self._recent:
             data = b"".join(self._recent)[-self._preroll :]
-            queue.put_nowait(data[self._frame_start(data) :])
+            sent = data[self._frame_start(data) :]
+            queue.put_nowait(sent)
+            position = self.position_of(self._total - len(sent))
         self._clients.add(queue)
         self._first_listener.set()
-        return queue
+        return queue, position
 
     def unsubscribe(self, queue: Queue[bytes]) -> None:
         self._clients.discard(queue)
@@ -1784,11 +1845,15 @@ class Broadcaster:
     def publish(self, chunk: bytes) -> None:
         self._recent.append(chunk)
         self._recent_size += len(chunk)
+        self._total += len(chunk)
+        self._marks.append((self._total, self.fed))
         while (
             len(self._recent) > 1
             and self._recent_size - len(self._recent[0]) >= self._preroll
         ):
             self._recent_size -= len(self._recent.popleft())
+        while len(self._marks) > len(self._recent) + 1:
+            self._marks.popleft()
         for queue in self._clients:
             # A listener that can't keep up loses its oldest audio.
             with contextlib.suppress(QueueFull):
@@ -2073,7 +2138,11 @@ def _add_web_page(app: web.Application) -> None:
 
 
 def _stream_handler(
-    hub: Broadcaster, content_type: str, *, titles: bool
+    hub: Broadcaster,
+    content_type: str,
+    *,
+    titles: bool,
+    starts: StartPositions | None = None,
 ) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
     """Make the handler that streams a hub to a listener."""
 
@@ -2090,13 +2159,17 @@ def _stream_handler(
         if with_titles:
             headers["icy-metaint"] = str(ICY_METAINT)
         response = web.StreamResponse(headers=headers)
-        await response.prepare(request)
-
-        queue = hub.subscribe()
+        queue, position = hub.subscribe_at()
+        # The page says who it is in the address (?l=...) and asks for
+        # where in the mix its player starts, to show the spectrum in time.
+        name = request.query.get("l", "")
+        if starts is not None and name and position is not None:
+            starts.set(name, position)
         log.info("Listener connected (%s): %s", content_type, request.remote)
         pending = bytearray()
         sent_title = None
         try:
+            await response.prepare(request)
             while True:
                 chunk = await queue.get()
                 if not with_titles:
@@ -2120,21 +2193,75 @@ def _stream_handler(
     return stream
 
 
+def _add_spectrum_api(
+    app: web.Application, spectrum: SpectrumFeed, starts: StartPositions
+) -> None:
+    """Add GET /api/spectrum: the bands of the mix as server-sent events."""
+
+    async def watch(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Access-Control-Allow-Origin": "*",
+                # A proxy in front must not hold the events back.
+                "X-Accel-Buffering": "no",
+            }
+        )
+        await response.prepare(request)
+        name = request.query.get("l", "")
+        start = await starts.get(name, SPECTRUM_START_WAIT) if name else None
+        queue, backlog = spectrum.subscribe(
+            None if start is None else start - SPECTRUM_BACKLOG_MARGIN
+        )
+        try:
+            await response.write(
+                b"event: start\ndata: "
+                + json.dumps({"position": start}).encode()
+                + b"\n\n"
+            )
+            frames = backlog
+            while True:
+                if frames:
+                    text = "".join(f"data: {f.to_json()}\n\n" for f in frames)
+                    await response.write(text.encode())
+                try:
+                    async with asyncio.timeout(SPECTRUM_KEEPALIVE_SECONDS):
+                        frames = await queue.get()
+                except TimeoutError:
+                    frames = []
+                    await response.write(b": keepalive\n\n")
+        except ConnectionError:
+            pass
+        finally:
+            spectrum.unsubscribe(queue)
+        return response
+
+    app.router.add_get("/api/spectrum", watch)
+
+
 def make_app(
     hub: Broadcaster,
     radio: Radio | None = None,
     backends: MultiBackend | None = None,
     lossless: Broadcaster | None = None,
+    spectrum: SpectrumFeed | None = None,
 ) -> web.Application:
     app = web.Application()
+    starts = StartPositions()
     app.router.add_get(
-        "/stream", _stream_handler(hub, "audio/mpeg", titles=True)
+        "/stream",
+        _stream_handler(hub, "audio/mpeg", titles=True, starts=starts),
     )
     if lossless is not None:
         app.router.add_get(
             "/stream.flac",
-            _stream_handler(lossless, "audio/flac", titles=False),
+            _stream_handler(
+                lossless, "audio/flac", titles=False, starts=starts
+            ),
         )
+    if spectrum is not None:
+        _add_spectrum_api(app, spectrum, starts)
     _add_web_page(app)
     if radio is not None:
         add_api(app, radio, backends)
@@ -2222,6 +2349,20 @@ async def _stop_encoders(
         await proc.wait()
 
 
+def _note_position(
+    pcm: Pcm,
+    analyzer: SpectrumAnalyzer,
+    hubs: list[Broadcaster],
+    spectrum: SpectrumFeed | None,
+) -> None:
+    """Tell the streams how far the mix is fed, and the page its bands."""
+    frames = analyzer.feed(pcm)
+    for stream in hubs:
+        stream.fed = analyzer.position
+    if spectrum is not None:
+        spectrum.publish(frames)
+
+
 async def _hold(radio: DeckSource, hubs: list[Broadcaster]) -> bool:
     """Wait while the mix is paused or nobody listens; say if it waited."""
     held = False
@@ -2243,9 +2384,16 @@ async def _encode_loop(
     hub: Broadcaster,
     effects: float,
     lossless: Broadcaster | None = None,
+    spectrum: SpectrumFeed | None = None,
 ) -> None:
     """Mix, encode and publish in real time while somebody listens."""
     hubs = [hub] if lossless is None else [hub, lossless]
+    analyzer = SpectrumAnalyzer()
+    # The positions in the mix start over with it.
+    for stream in hubs:
+        stream.reset_position()
+    if spectrum is not None:
+        spectrum.reset()
     encoders = await _start_encoders(hub, lossless)
     forwarders = [
         create_task(_forward(proc.stdout, target), name="dj-forward")
@@ -2260,6 +2408,8 @@ async def _encode_loop(
             if await _hold(radio, hubs):
                 started, produced = loop.time(), 0.0
             hub.title = title
+            # Before the encoders get it: what they write next is of this.
+            _note_position(pcm, analyzer, hubs, spectrum)
             data = np.ascontiguousarray(pcm).tobytes()
             stdins = [p.stdin for p, _ in encoders if p.stdin is not None]
             for stdin in stdins:
@@ -2281,11 +2431,12 @@ async def encode_forever(
     hub: Broadcaster,
     effects: float,
     lossless: Broadcaster | None = None,
+    spectrum: SpectrumFeed | None = None,
 ) -> None:
     """Keep the mix going: a failure ends only the mix it happened in."""
     while True:
         try:
-            await _encode_loop(radio, hub, effects, lossless)
+            await _encode_loop(radio, hub, effects, lossless, spectrum)
         except CancelledError:
             raise
         except Exception:
@@ -2349,13 +2500,16 @@ async def serve(
             bytes_per_second=FLAC_BYTES_PER_SECOND,
             frame_start=flac_start,
             header_length=flac_header_length,
+            lag_seconds=FLAC_LAG_SECONDS,
         )
+        spectrum = SpectrumFeed()
         runner = web.AppRunner(
             make_app(
                 hub,
                 radio,
                 backend if isinstance(backend, MultiBackend) else None,
                 lossless,
+                spectrum,
             ),
             access_log=None,
         )
@@ -2386,7 +2540,7 @@ async def serve(
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
                 await encode_forever(
-                    radio, hub, EFFECT_LEVELS[effects], lossless
+                    radio, hub, EFFECT_LEVELS[effects], lossless, spectrum
                 )
             finally:
                 refill.cancel()

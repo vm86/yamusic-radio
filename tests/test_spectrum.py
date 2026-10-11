@@ -146,8 +146,8 @@ def test_a_listener_is_told_where_in_the_mix_it_starts() -> None:
     assert sum(len(c) for c in [queue.get_nowait()]) == 2000  # 2 s: the preroll
     assert position == pytest.approx(3.0)  # the head is at 5 s
 
-    # Nothing published yet: no position.
-    assert dj.Broadcaster().subscribe_at()[1] is None
+    # Nothing published yet: the first listener starts at the beginning.
+    assert dj.Broadcaster().subscribe_at()[1] == 0.0
     # The mix starting over forgets where it was.
     hub.reset_position()
     assert hub.subscribe_at()[1] is None

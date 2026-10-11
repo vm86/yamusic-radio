@@ -1829,7 +1829,9 @@ class Broadcaster:
         queue: Queue[bytes] = Queue(CLIENT_QUEUE_SIZE)
         if self.header:
             queue.put_nowait(self.header)
-        position = None
+        # The first listener of a mix that has just begun has nothing to
+        # catch up with: it starts at the beginning of the mix.
+        position: float | None = 0.0 if self._total == 0 else None
         if self._recent:
             data = b"".join(self._recent)[-self._preroll :]
             sent = data[self._frame_start(data) :]

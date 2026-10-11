@@ -18,7 +18,7 @@ const player = usePlayer(radio.now);
 
 <template>
   <SpriteSheet />
-  <AppBar :playing="player.playing.value" />
+  <AppBar :playing="player.playing.value" :paused="radio.pausedByUser.value" />
 
   <main>
     <AuthCard

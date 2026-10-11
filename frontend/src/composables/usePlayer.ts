@@ -27,10 +27,21 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   const sync = () => (playing.value = !audio.paused);
   audio.addEventListener("playing", sync);
   audio.addEventListener("pause", sync);
-  audio.addEventListener("error", () => {
-    if (audio.getAttribute("src")) toast(t("toast.streamDown"));
+  // The stream is gone (the radio restarted, the network dropped): the
+  // element doesn't pause by itself, so it is stopped to show that it is.
+  function dropStream(): void {
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
     sync();
+  }
+  audio.addEventListener("error", () => {
+    if (audio.getAttribute("src")) {
+      toast(t("toast.streamDown"));
+      dropStream();
+    }
   });
+  audio.addEventListener("ended", dropStream);
 
   watch(
     volume,

@@ -15,6 +15,8 @@ const queueOf = (moods: MoodsInfo): Queue => ({
   next: [],
   moods,
   skip_pending: false,
+  paused: false,
+  pause_reason: null,
 });
 
 const api = vi.hoisted(() => ({
@@ -61,6 +63,37 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
+});
+
+describe("the time of the track", () => {
+  const playing = (paused: boolean): Queue => ({
+    ...queueOf(moodsOf([])),
+    now: {
+      title: "A",
+      artists: [],
+      duration_seconds: 100,
+      elapsed_seconds: 10,
+    } as unknown as Queue["now"],
+    paused,
+    pause_reason: paused ? "user" : null,
+  });
+
+  it("runs between the polls, and stands while the radio is paused", async () => {
+    api.queue.mockResolvedValue(playing(false));
+    const { radio, wrapper } = setup();
+    await settle();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(radio.elapsed.value).toBeGreaterThan(11);
+
+    api.queue.mockResolvedValue(playing(true));
+    await vi.advanceTimersByTimeAsync(3000);
+    const stood = radio.elapsed.value;
+    expect(stood).toBe(10);
+    expect(radio.pausedByUser.value).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(radio.elapsed.value).toBe(stood);
+    wrapper.unmount();
+  });
 });
 
 describe("picking moods", () => {

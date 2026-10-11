@@ -38,6 +38,9 @@ export interface Queue {
   moods: MoodsInfo;
   /** The next track was asked for and its blend has not begun. */
   skip_pending: boolean;
+  /** The mix stands: paused through the API, or nobody listens. */
+  paused: boolean;
+  pause_reason: "user" | "no_listeners" | null;
 }
 
 export interface AuthField {

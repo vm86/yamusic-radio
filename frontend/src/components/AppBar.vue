@@ -5,7 +5,7 @@ import Icon from "./Icon.vue";
 import LocaleButton from "./LocaleButton.vue";
 import ThemeButton from "./ThemeButton.vue";
 
-defineProps<{ playing: boolean }>();
+defineProps<{ playing: boolean; paused?: boolean }>();
 
 // The bar takes a tonal surface once the page is scrolled.
 const scrolled = ref(false);
@@ -20,8 +20,8 @@ onBeforeUnmount(() => window.removeEventListener("scroll", onScroll));
   <header class="app-bar" :class="{ scrolled }">
     <Icon name="vinyl" class="logo" />
     <h1>{{ t("app.title") }}</h1>
-    <span class="live" :class="{ on: playing }" role="status">
-      {{ playing ? t("bar.live") : t("bar.pause") }}
+    <span class="live" :class="{ on: playing && !paused }" role="status">
+      {{ paused ? t("bar.radioPaused") : playing ? t("bar.live") : t("bar.pause") }}
     </span>
     <LocaleButton />
     <ThemeButton />

@@ -178,9 +178,13 @@ export function useRadio() {
   const elapsed = computed(() => {
     const track = now.value;
     if (!track) return 0;
-    const passed = track.elapsed_seconds + (tick.value - fetchedAt.value) / 1000;
+    // The radio's own count stands while the mix does.
+    const running = queue.value?.paused ? 0 : (tick.value - fetchedAt.value) / 1000;
+    const passed = track.elapsed_seconds + running;
     return Math.min(passed, track.duration_seconds);
   });
+
+  const pausedByUser = computed(() => queue.value?.pause_reason === "user");
 
   function onVisible(): void {
     if (!document.hidden) void refresh();
@@ -211,6 +215,7 @@ export function useRadio() {
     pendingMoods,
     now,
     elapsed,
+    pausedByUser,
     busy,
     refreshing,
     setMoods,

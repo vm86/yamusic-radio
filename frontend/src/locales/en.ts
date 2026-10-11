@@ -4,6 +4,7 @@ export const en: Messages = {
   "app.title": "Yandex Music DJ",
   "bar.live": "On air",
   "bar.pause": "Paused",
+  "bar.radioPaused": "Radio paused",
   "theme.auto": "Theme: system",
   "theme.light": "Theme: light",
   "theme.dark": "Theme: dark",

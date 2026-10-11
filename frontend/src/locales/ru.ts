@@ -3,6 +3,7 @@ export const ru = {
   "app.title": "Яндекс Музыка DJ",
   "bar.live": "В эфире",
   "bar.pause": "Пауза",
+  "bar.radioPaused": "Радио на паузе",
   "theme.auto": "Тема: системная",
   "theme.light": "Тема: светлая",
   "theme.dark": "Тема: тёмная",

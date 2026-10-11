@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 np = pytest.importorskip("numpy")
 
 from yamusic_radio import dj, dj_mix  # noqa: E402
+from yamusic_radio.backend import Feedback  # noqa: E402
 
 SR = dj_mix.SAMPLE_RATE
 
@@ -628,32 +629,35 @@ def test_choice_is_the_start_of_the_best_queue() -> None:
 
 
 class FakeTrack:
-    """The bits of ExtendTrack that the radio uses."""
+    """The bits of Track that the radio uses."""
 
-    def __init__(self, name: str, artist: str = "", genre: str = "") -> None:
+    def __init__(
+        self, name: str, artist: str = "", genre: str = "", mood: str = ""
+    ) -> None:
         self.genre = genre
         self.track_id = name
         self.title = name
         self.codec = "mp3"
         self.bitrate_in_kbps = 192
         self.batch_id = "batch"
-        self._artist = artist or name
+        self.cover = ""
+        self.mood = mood
+        self.artists = (artist or name,)
 
-    def artists_name(self) -> list[str]:
-        return [self._artist]
 
-
-class FakePlayer:
+class FakeBackend:
     """A station that gives out the batches it is told to."""
+
+    supports_moods = True
 
     def __init__(self, batches: list[list[FakeTrack]]) -> None:
         self.batches = batches
         self.requests = 0
         self.feedback: list[tuple[str, str, float]] = []
         self.settings: list[tuple[str, str, str]] = []
-        self.is_init = True
+        self.authorized = True
         self.auth_url: str | None = None
-        self.user_code: str | None = None
+        self.auth_code: str | None = None
 
     async def station_batch(
         self, station_id: str, *, exclude_track_ids: set[str]
@@ -671,24 +675,26 @@ class FakePlayer:
     ) -> None:
         self.settings.append((mood, diversity, language))
 
-    async def get_download_links(self, *args: object) -> list[str]:
-        return ["http://example.invalid/track"]
+    async def download(self, track: FakeTrack, path: Path) -> None:
+        path.write_bytes(b"x")
 
     async def feedback_track(
         self,
-        track_id: str,
-        kind: str,
+        track: FakeTrack,
+        feedback: Feedback,
         station_id: str,
-        batch_id: str,
         seconds: float,
     ) -> None:
-        self.feedback.append((track_id, kind, seconds))
+        self.feedback.append((track.track_id, feedback, seconds))
+
+    async def aclose(self) -> None:
+        return None
 
 
 def make_radio(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    player: FakePlayer,
+    backend: FakeBackend,
     bpms: dict[str, float],
     *,
     mood_arc: bool = False,
@@ -696,7 +702,7 @@ def make_radio(
 ) -> dj.Radio:
     """Make a radio whose tracks are 200 s of silence with a given tempo."""
     radio = dj.Radio(
-        player, None, tmp_path, pool_size=4, mood_arc=mood_arc, cache=cache
+        backend, tmp_path, pool_size=4, mood_arc=mood_arc, cache=cache
     )
 
     async def download(track: FakeTrack, path: Path) -> None:
@@ -709,7 +715,7 @@ def make_radio(
                 track.title,
                 tmp_path / f"{track.track_id}.mp3",
                 track_analysis(bpms.get(track.track_id, 120)),
-                frozenset(track.artists_name()),
+                frozenset(track.artists),
                 track,
                 mood,
                 track.genre,
@@ -738,8 +744,8 @@ def track_analysis(bpm: float) -> dj_mix.TrackAnalysis:
 async def test_played_tracks_are_marked_and_not_picked_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
 
     first = await radio.next_deck(None)
@@ -757,7 +763,7 @@ async def test_more_tracks_are_loaded_when_nothing_fits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The pool has only a clashing tempo; the next batch has a good one.
-    player = FakePlayer(
+    backend = FakeBackend(
         [
             [FakeTrack("fast")],
             [FakeTrack("x1"), FakeTrack("x2"), FakeTrack("good")],
@@ -766,7 +772,7 @@ async def test_more_tracks_are_loaded_when_nothing_fits(
     radio = make_radio(
         tmp_path,
         monkeypatch,
-        player,
+        backend,
         {"fast": 175, "x1": 175, "x2": 175, "good": 121},
     )
     await radio.fill(1)
@@ -774,7 +780,7 @@ async def test_more_tracks_are_loaded_when_nothing_fits(
     deck = await radio.next_deck(track_analysis(120))
 
     assert deck.title == "good"
-    assert player.requests == 2
+    assert backend.requests == 2
     assert len(radio.pool) == 3  # the others wait for their turn
 
 
@@ -783,10 +789,10 @@ async def test_loading_more_stops_at_six_extra_tracks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clashing = {f"t{i}": 175 for i in range(20)}
-    player = FakePlayer(
+    backend = FakeBackend(
         [[FakeTrack(f"t{3 * i + k}") for k in range(3)] for i in range(7)]
     )
-    radio = make_radio(tmp_path, monkeypatch, player, clashing)
+    radio = make_radio(tmp_path, monkeypatch, backend, clashing)
     await radio.fill(1)
     loaded_before = len(radio.pool)
 
@@ -800,8 +806,8 @@ async def test_loading_more_stops_at_six_extra_tracks(
 async def test_oldest_played_track_is_repeated_when_the_station_repeats(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(2)
     first = await radio.next_deck(None)
     second = await radio.next_deck(first.analysis)
@@ -818,8 +824,8 @@ async def test_oldest_played_track_is_repeated_when_the_station_repeats(
 async def test_feedback_goes_to_the_station(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(1)
     deck = await radio.next_deck(None)
 
@@ -827,9 +833,9 @@ async def test_feedback_goes_to_the_station(
     radio.finished(deck)
     await asyncio.gather(*radio._feedback_tasks)
 
-    assert player.feedback == [
-        ("a", "trackStarted", 0.0),
-        ("a", "trackFinished", 200.0),
+    assert backend.feedback == [
+        ("a", Feedback.STARTED, 0.0),
+        ("a", Feedback.FINISHED, 200.0),
     ]
 
 
@@ -870,17 +876,17 @@ def test_a_track_of_the_wanted_mood_is_preferred() -> None:
 async def test_mood_is_set_before_loading_and_restored_after(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer(
+    backend = FakeBackend(
         [[FakeTrack(f"t{3 * r + i}") for i in range(3)] for r in range(4)]
     )
-    radio = make_radio(tmp_path, monkeypatch, player, {}, mood_arc=True)
+    radio = make_radio(tmp_path, monkeypatch, backend, {}, mood_arc=True)
 
     await radio.start_mood_arc()
     await radio.fill(12)
     await radio.restore_settings()
 
     # Rounds of three tracks, each for the mood of the place it will be at.
-    assert player.settings == [
+    assert backend.settings == [
         ("calm", "default", "any"),
         ("active", "default", "any"),
         ("calm", "default", "any"),
@@ -895,13 +901,13 @@ async def test_mood_is_set_before_loading_and_restored_after(
 async def test_without_mood_arc_the_settings_are_left_alone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
 
     await radio.fill(2)
     await radio.restore_settings()
 
-    assert player.settings == []
+    assert backend.settings == []
 
 
 @pytest.mark.asyncio
@@ -911,7 +917,7 @@ async def test_played_tracks_are_not_picked_again_after_a_restart(
     cache = track_cache
     tracks = [FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]
     radio = make_radio(
-        tmp_path, monkeypatch, FakePlayer([tracks]), {}, cache=cache
+        tmp_path, monkeypatch, FakeBackend([tracks]), {}, cache=cache
     )
     await radio.fill(2)
     for name in "abc":  # as _prepare does
@@ -921,7 +927,7 @@ async def test_played_tracks_are_not_picked_again_after_a_restart(
     restarted = make_radio(
         tmp_path,
         monkeypatch,
-        FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
+        FakeBackend([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
         {},
         cache=cache,
     )
@@ -936,7 +942,7 @@ async def test_cached_analysis_skips_decoding_and_analyzing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
 ) -> None:
     cache = track_cache
-    radio = dj.Radio(FakePlayer([]), None, tmp_path, pool_size=1, cache=cache)
+    radio = dj.Radio(FakeBackend([]), tmp_path, pool_size=1, cache=cache)
     decoded: list[Path] = []
 
     async def download(track: FakeTrack, path: Path) -> None:
@@ -969,8 +975,8 @@ async def test_only_the_allowed_moods_are_fetched_and_played(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     names = [FakeTrack(f"t{n}") for n in range(30)]
-    player = FakePlayer([names[i : i + 3] for i in range(0, 30, 3)])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([names[i : i + 3] for i in range(0, 30, 3)])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(4)  # tracks of the station's own mood first
     assert {c.mood for c in radio.pool} == {""}
 
@@ -982,18 +988,18 @@ async def test_only_the_allowed_moods_are_fetched_and_played(
     deck = await radio.next_deck(None)
     assert {c.mood for c in radio.pool} <= {"calm", "active"}
     assert deck.mood in {"calm", "active"}
-    assert {s[0] for s in player.settings} <= {"calm", "active", "all"}
+    assert {s[0] for s in backend.settings} <= {"calm", "active", "all"}
 
     await radio.set_allowed_moods([])
-    assert player.settings[-1][0] == "all"  # the account is as it was
+    assert backend.settings[-1][0] == "all"  # the account is as it was
 
 
 @pytest.mark.asyncio
 async def test_queue_shows_previous_now_and_next_tracks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack(n) for n in "abcdefg"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abcdefg"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(6)
     assert radio.queue()["now"] is None
 
@@ -1027,8 +1033,8 @@ async def test_rest_api(
 ) -> None:
     from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
 
-    player = FakePlayer([[FakeTrack(n) for n in "abcd"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abcd"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(4)
     deck = await radio.next_deck(None)
     radio.started(deck)
@@ -1075,17 +1081,17 @@ async def test_api_tells_where_to_authorize(
 ) -> None:
     from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
 
-    player = FakePlayer([])
-    player.is_init = False
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([])
+    backend.authorized = False
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     app = dj.make_app(dj.Broadcaster(), radio)
 
     async with TestClient(TestServer(app)) as client:
         waiting = await (await client.get("/api/auth")).json()
         assert waiting == {"authorized": False, "url": None, "code": None}
 
-        player.auth_url = "https://ya.example/device"
-        player.user_code = "ABCD1234"
+        backend.auth_url = "https://ya.example/device"
+        backend.auth_code = "ABCD1234"
         waiting = await (await client.get("/api/auth")).json()
         assert waiting["url"] == "https://ya.example/device"
         assert waiting["code"] == "ABCD1234"
@@ -1095,7 +1101,7 @@ async def test_api_tells_where_to_authorize(
         assert (await client.delete("/api/moods")).status == 503
         assert (await client.get("/api/queue")).status == 200
 
-        player.is_init = True
+        backend.authorized = True
         done = await (await client.get("/api/auth")).json()
         assert done == {"authorized": True, "url": None, "code": None}
 
@@ -1167,8 +1173,8 @@ def test_camelot_wheel() -> None:
 async def test_refresh_queue_puts_the_chosen_track_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
     first = await radio.next_deck(None)
     radio.started(first)
@@ -1192,8 +1198,8 @@ async def test_refresh_queue_puts_the_chosen_track_back(
 async def test_refresh_queue_drops_tracks_of_other_moods(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(2)
     for candidate, mood in zip(radio.pool, ("calm", "fun"), strict=True):
         candidate.mood = mood
@@ -1208,8 +1214,8 @@ async def test_refresh_queue_drops_tracks_of_other_moods(
 async def test_refresh_during_decoding_chooses_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(2)
     decoded = []
 
@@ -1233,8 +1239,8 @@ async def test_refresh_during_decoding_chooses_again(
 async def test_track_file_is_removed_when_the_track_is_heard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(1)
     deck = await radio.next_deck(None)
     assert (tmp_path / "a.mp3").exists()  # still needed to take it back
@@ -1322,7 +1328,7 @@ async def test_genre_is_kept_in_the_cache_not_in_the_api(
     monkeypatch: pytest.MonkeyPatch,
     track_cache: TrackCache,
 ) -> None:
-    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+    radio = dj.Radio(FakeBackend([]), tmp_path, cache=track_cache)
 
     async def download(track: FakeTrack, path: Path) -> None:
         path.write_bytes(b"x")
@@ -1375,7 +1381,7 @@ async def test_transitions_are_counted_and_kept(
     radio = make_radio(
         tmp_path,
         monkeypatch,
-        FakePlayer([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
+        FakeBackend([[FakeTrack("a"), FakeTrack("b"), FakeTrack("c")]]),
         {},
         cache=track_cache,
     )
@@ -1435,7 +1441,7 @@ async def test_transitions_are_counted_and_kept(
 
 
 def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
-    radio = dj.Radio(FakePlayer([]), None, tmp_path)
+    radio = dj.Radio(FakeBackend([]), tmp_path)
 
     assert radio.transition_stats() == {
         "session": {
@@ -1454,7 +1460,7 @@ def test_transition_stats_without_a_cache(tmp_path: Path) -> None:
 def genre_radio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracks: list[FakeTrack]
 ) -> dj.Radio:
-    return make_radio(tmp_path, monkeypatch, FakePlayer([tracks]), {})
+    return make_radio(tmp_path, monkeypatch, FakeBackend([tracks]), {})
 
 
 @pytest.mark.asyncio
@@ -1528,7 +1534,7 @@ async def test_tracks_of_other_genres_are_not_downloaded(
 def test_genres_to_pick_are_the_known_ones(
     tmp_path: Path, track_cache: TrackCache
 ) -> None:
-    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+    radio = dj.Radio(FakeBackend([]), tmp_path, cache=track_cache)
     for name, genre in (
         ("1", "rap"),
         ("2", "house"),
@@ -1547,7 +1553,7 @@ def test_genres_to_pick_are_the_known_ones(
 def test_genres_are_preset_while_the_cache_has_none(
     tmp_path: Path, track_cache: TrackCache
 ) -> None:
-    radio = dj.Radio(FakePlayer([]), None, tmp_path, cache=track_cache)
+    radio = dj.Radio(FakeBackend([]), tmp_path, cache=track_cache)
     assert radio.genres_info()["available"] == list(dj.KNOWN_GENRES)
 
     radio.set_wanted_genres(["techno"])
@@ -1678,28 +1684,13 @@ async def test_a_failed_mix_starts_again(
     assert pauses == [dj.RESTART_SECONDS] * 2
 
 
-def test_cover_template_gets_https_and_keeps_the_size_placeholder() -> None:
-    track = FakeTrack("a")
-    assert dj.cover_template(None) == ""
-    assert dj.cover_template(track) == ""  # a track without a cover
-
-    track.cover_uri = "avatars.yandex.net/get-music-content/1/abc/%%"
-    assert dj.cover_template(track) == (
-        "https://avatars.yandex.net/get-music-content/1/abc/%%"
-    )
-
-    track.cover_uri = None
-    track.og_image = "https://avatars.yandex.net/get-music-content/2/x/%%"
-    assert dj.cover_template(track) == track.og_image
-
-
 @pytest.mark.asyncio
 async def test_queue_gives_the_cover_of_each_track(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tracks = [FakeTrack(n) for n in "abc"]
-    tracks[0].cover_uri = "avatars.yandex.net/x/%%"
-    radio = make_radio(tmp_path, monkeypatch, FakePlayer([tracks]), {})
+    tracks[0].cover = "https://avatars.yandex.net/x/%%"
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([tracks]), {})
     await radio.fill(3)
     deck = await radio.next_deck(None)
     radio.started(deck)
@@ -2025,8 +2016,8 @@ async def test_mix_does_not_stop_when_the_tempo_glide_fails(
 async def test_next_deck_keeps_the_tempo_of_the_track_and_says_how_far_it_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a"), FakeTrack("b")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {"a": 120, "b": 128})
+    backend = FakeBackend([[FakeTrack("a"), FakeTrack("b")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {"a": 120, "b": 128})
     await radio.fill(2)
 
     first = await radio.next_deck(None)
@@ -2242,8 +2233,8 @@ def test_early_blend_is_let_go_when_there_is_no_room_left() -> None:
 async def test_the_next_track_can_not_be_asked_for_before_anything_plays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack("a")]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack("a")]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
 
     with pytest.raises(dj.SkipRefusedError, match="nothing is playing"):
         radio.request_skip()
@@ -2254,8 +2245,8 @@ async def test_the_next_track_can_not_be_asked_for_before_anything_plays(
 async def test_skip_is_pending_until_a_blend_and_never_during_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
     first = await radio.next_deck(None)
     radio.started(first)
@@ -2281,8 +2272,8 @@ async def test_skip_is_pending_until_a_blend_and_never_during_one(
 async def test_a_skipped_track_is_reported_to_the_station_as_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
     first = await radio.next_deck(None)
     radio.started(first)
@@ -2299,12 +2290,14 @@ async def test_a_skipped_track_is_reported_to_the_station_as_skipped(
     radio.finished(second)  # heard to the end
     await asyncio.sleep(0)
 
-    kinds = [(track, kind) for track, kind, _ in player.feedback]
-    assert ("a", "skip") in kinds
-    assert ("a", "trackFinished") not in kinds
-    assert ("b", "trackFinished") in kinds
+    kinds = [(track, kind) for track, kind, _ in backend.feedback]
+    assert ("a", Feedback.SKIPPED) in kinds
+    assert ("a", Feedback.FINISHED) not in kinds
+    assert ("b", Feedback.FINISHED) in kinds
     heard = next(
-        seconds for _, kind, seconds in player.feedback if kind == "skip"
+        seconds
+        for _, kind, seconds in backend.feedback
+        if kind == Feedback.SKIPPED
     )
     assert 0 <= heard < 5  # how long it was heard, not its length
 
@@ -2315,8 +2308,8 @@ async def test_rest_api_next_track(
 ) -> None:
     from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
 
-    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
     app = dj.make_app(dj.Broadcaster(), radio)
 
@@ -2610,8 +2603,8 @@ async def test_the_last_blends_are_listed_in_the_api(
 ) -> None:
     from aiohttp.test_utils import TestClient, TestServer  # noqa: PLC0415
 
-    player = FakePlayer([[FakeTrack(n) for n in "abc"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "abc"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(3)
     first = await radio.next_deck(None)
     second = await radio.next_deck(first.analysis)
@@ -2656,8 +2649,8 @@ async def test_the_last_blends_are_listed_in_the_api(
 async def test_only_the_last_ten_blends_are_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    player = FakePlayer([[FakeTrack(n) for n in "ab"]])
-    radio = make_radio(tmp_path, monkeypatch, player, {})
+    backend = FakeBackend([[FakeTrack(n) for n in "ab"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
     await radio.fill(2)
     first = await radio.next_deck(None)
     second = await radio.next_deck(first.analysis)
@@ -2847,11 +2840,11 @@ def persistent_radio(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cache: TrackCache,
-    player: FakePlayer | None = None,
-) -> tuple[dj.Radio, FakePlayer]:
+    backend: FakeBackend | None = None,
+) -> tuple[dj.Radio, FakeBackend]:
     """Make a radio on the cache, like a run of the program."""
-    player = player or FakePlayer([[FakeTrack(f"t{n}") for n in range(12)]])
-    return make_radio(tmp_path, monkeypatch, player, {}, cache=cache), player
+    backend = backend or FakeBackend([[FakeTrack(f"t{n}") for n in range(12)]])
+    return make_radio(tmp_path, monkeypatch, backend, {}, cache=cache), backend
 
 
 @pytest.mark.asyncio
@@ -2862,7 +2855,7 @@ async def test_picked_moods_come_back_after_a_restart(
     await first.set_allowed_moods(["fun", "calm"])
     await first.restore_settings()  # a clean stop
 
-    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    again, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
     assert again.allowed_moods == ()  # nothing yet
 
     await again.restore_state()
@@ -2872,8 +2865,8 @@ async def test_picked_moods_come_back_after_a_restart(
     # The account was read for putting it back, and what comes is of the moods.
     await again.fill(3)
     assert {c.mood for c in again.pool} <= {"calm", "fun"}
-    assert player.settings
-    assert {mood for mood, _, _ in player.settings} <= {"calm", "fun"}
+    assert backend.settings
+    assert {mood for mood, _, _ in backend.settings} <= {"calm", "fun"}
 
 
 @pytest.mark.asyncio
@@ -2883,13 +2876,13 @@ async def test_no_moods_stay_no_moods_and_the_account_is_not_touched(
     first, _ = persistent_radio(tmp_path, monkeypatch, track_cache)
     await first.set_allowed_moods(["calm"])
     await first.set_allowed_moods([])  # picked and cleared
-    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    again, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
 
     await again.restore_state()
 
     assert again.allowed_moods == ()
     assert again.mood_arc_saved is None
-    assert player.settings == []
+    assert backend.settings == []
 
 
 @pytest.mark.asyncio
@@ -2902,17 +2895,17 @@ async def test_a_killed_run_leaves_the_station_settings_for_the_next_one(
     assert first_player.settings[-1][0] == "calm"
     # ... and the process is killed: no restore_settings.
 
-    again, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    again, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
     await again.restore_state()
 
     # The account was put back first, then the pick was applied again.
-    assert player.settings[0] == ("all", "default", "any")
+    assert backend.settings[0] == ("all", "default", "any")
     assert again.allowed_moods == ("calm",)
     assert again.mood_arc_saved == ("all", "default", "any")
     # A clean stop of this run puts it back and forgets it.
     await again.fill(3)
     await again.restore_settings()
-    assert player.settings[-1] == ("all", "default", "any")
+    assert backend.settings[-1] == ("all", "default", "any")
     assert track_cache.get_setting("station_settings") is None
     assert track_cache.get_setting("moods") == ["calm"]  # still picked
 
@@ -2921,14 +2914,14 @@ async def test_a_killed_run_leaves_the_station_settings_for_the_next_one(
 async def test_a_clean_stop_forgets_the_station_settings_but_not_the_picks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
 ) -> None:
-    radio, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    radio, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
     await radio.set_allowed_moods(["fun"])
     assert track_cache.get_setting("station_settings") is not None
     await radio.fill(3)
 
     await radio.restore_settings()
 
-    assert player.settings[-1] == ("all", "default", "any")
+    assert backend.settings[-1] == ("all", "default", "any")
     assert track_cache.get_setting("station_settings") is None
     assert track_cache.get_setting("moods") == ["fun"]
 
@@ -2941,12 +2934,12 @@ async def test_settings_that_could_not_be_put_back_are_tried_again_next_time(
         "station_settings",
         {"station": "user:onyourwave", "settings": ["all", "default", "any"]},
     )
-    radio, player = persistent_radio(tmp_path, monkeypatch, track_cache)
+    radio, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
 
     async def broken(*args: object) -> None:
         raise ConnectionError("no network")
 
-    monkeypatch.setattr(player, "set_station_settings", broken)
+    monkeypatch.setattr(backend, "set_station_settings", broken)
 
     await radio.restore_state()  # does not raise
 
@@ -2992,7 +2985,7 @@ async def test_picked_genres_come_back_in_force_after_a_restart(
 async def test_restore_state_without_a_cache_does_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    radio = make_radio(tmp_path, monkeypatch, FakePlayer([]), {})
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
 
     await radio.restore_state()
 
@@ -3003,7 +2996,7 @@ async def test_restore_state_without_a_cache_does_nothing(
 async def test_allowed_moods_can_be_given_as_any_iterable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    radio = make_radio(tmp_path, monkeypatch, FakePlayer([]), {})
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
 
     # A generator is read once: every mood in it counts, not only the first.
     await radio.set_allowed_moods(m for m in ("fun", "calm", "angry"))
@@ -3055,3 +3048,77 @@ async def test_blocked_genres_come_back_after_a_restart(
     assert info["blocked"] == ["rap", "metal"]
     assert info["blocked_applied"] == ["rap", "metal"]
     assert {"rap", "metal"} <= set(info["available"])  # type: ignore[arg-type]
+
+
+def test_mood_of_a_track_follows_its_energy_and_key() -> None:
+    def mood(bpm: float, loudness: float, key: int = 0) -> str:
+        analysis = dataclasses.replace(
+            track_analysis(bpm), loudness_db=loudness, key=key
+        )
+        return dj_mix.mood_of(analysis)
+
+    assert mood(80, -20) == "calm"  # major key: not sad
+    assert mood(80, -20, key=21) == "sad"
+    assert mood(110, -12) == "fun"
+    assert mood(150, -6) == "active"
+
+
+class SoundOnlyBackend(FakeBackend):
+    """A backend that knows nothing of moods."""
+
+    supports_moods = False
+
+
+@pytest.mark.asyncio
+async def test_without_backend_moods_the_radio_judges_by_sound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = SoundOnlyBackend([[FakeTrack("quiet"), FakeTrack("loud")]])
+    radio = dj.Radio(backend, tmp_path, pool_size=2)
+    sounds = {
+        "quiet": dataclasses.replace(track_analysis(80), loudness_db=-20),
+        "loud": dataclasses.replace(track_analysis(150), loudness_db=-6),
+    }
+
+    async def download(track: FakeTrack, path: Path) -> None:
+        path.write_bytes(b"x")
+
+    async def decode(path: Path, speed: float = 1.0) -> np.ndarray:
+        return np.zeros((SR, CHANNELS), np.float32)
+
+    name = ""
+
+    def analyze(_pcm: np.ndarray) -> dj_mix.TrackAnalysis:
+        return sounds[name]
+
+    monkeypatch.setattr(radio, "_download", download)
+    monkeypatch.setattr(dj, "decode_file", decode)
+    monkeypatch.setattr(dj_mix, "analyze", analyze)
+
+    await radio.set_allowed_moods(["active"])
+    for name in sounds:
+        await radio._prepare(FakeTrack(name))
+
+    assert [c.mood for c in radio.pool] == ["active"]
+    assert backend.settings == []  # the account is left alone
+
+
+@pytest.mark.asyncio
+async def test_the_mood_the_backend_gives_wins_over_the_sound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = dj.Radio(SoundOnlyBackend([]), tmp_path, pool_size=1)
+
+    async def download(track: FakeTrack, path: Path) -> None:
+        path.write_bytes(b"x")
+
+    async def decode(path: Path, speed: float = 1.0) -> np.ndarray:
+        return np.zeros((SR, CHANNELS), np.float32)
+
+    monkeypatch.setattr(radio, "_download", download)
+    monkeypatch.setattr(dj, "decode_file", decode)
+    monkeypatch.setattr(dj_mix, "analyze", lambda _pcm: track_analysis(150))
+
+    await radio._prepare(FakeTrack("a", mood="sad"))
+
+    assert [c.mood for c in radio.pool] == ["sad"]

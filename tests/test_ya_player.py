@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from yamusic_radio.ya_player import SETTINGS_MODE, YandexMusicPlayer
+from yamusic_radio import backend
+from yamusic_radio.ya_player import (
+    SETTINGS_MODE,
+    ExtendTrack,
+    YandexMusicPlayer,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,3 +54,32 @@ async def test_defaults_are_not_shared_between_players(
     assert second.config["token"] is None
     await first.aclose()
     await second.aclose()
+
+
+def test_cover_gets_https_and_keeps_the_size_placeholder() -> None:
+    track = ExtendTrack(id="a", cover_uri=None, og_image=None)
+    assert track.cover == ""  # a track without a cover
+
+    track.cover_uri = "avatars.yandex.net/get-music-content/1/abc/%%"
+    assert (
+        track.cover == "https://avatars.yandex.net/get-music-content/1/abc/%%"
+    )
+
+    track.cover_uri = None
+    track.og_image = "https://avatars.yandex.net/get-music-content/2/x/%%"
+    assert track.cover == track.og_image
+
+
+def test_a_yandex_track_becomes_a_backend_track() -> None:
+    track = ExtendTrack(id="7", title="Song", cover_uri="c/%%")
+    track.codec = "flac-mp4"
+    track.batch_id = "b1"
+
+    assert track.to_backend_track() == backend.Track(
+        track_id="7",
+        title="Song",
+        artists=(),
+        codec="flac-mp4",
+        cover="https://c/%%",
+        batch_id="b1",
+    )

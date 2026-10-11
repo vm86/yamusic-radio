@@ -9,12 +9,16 @@ import socket
 from argparse import ArgumentParser, Namespace
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from aiohttp import ClientSession, ClientTimeout
 
 from yamusic_radio import dj
 from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
 from yamusic_radio.ya_player import YandexMusicPlayer
+
+if TYPE_CHECKING:
+    from yamusic_radio.backend import MusicBackend
 
 faulthandler.enable()
 log = logging.getLogger(__name__)
@@ -143,18 +147,26 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
+def create_backend(options: Namespace, session: ClientSession) -> MusicBackend:
+    """Make the music service the radio takes its tracks from.
+
+    The one place to change to play from another service or from a local
+    collection: return any `MusicBackend`.
+    """
+    return YandexMusicPlayer(options.config, session)
+
+
 async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     session = ClientSession(
         raise_for_status=False,
         timeout=ClientTimeout(sock_read=10, sock_connect=5),
     )
-    player = YandexMusicPlayer(options.config, session)
+    backend = create_backend(options, session)
     cache = None if options.no_cache else TrackCache(options.cache)
     ready = asyncio.Event()
     serve_task = asyncio.create_task(
         dj.serve(
-            player,
-            session,
+            backend,
             host=options.host,
             port=options.port,
             station_id=options.station,
@@ -193,7 +205,7 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
         with suppress(asyncio.CancelledError):
             await serve_task
     finally:
-        await player.aclose()
+        await backend.aclose()
         await session.close()
         if cache is not None:
             cache.close()

@@ -13,6 +13,7 @@ from asyncio.tasks import create_task
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from aiohttp import ClientError
 from yandex_music import (
     ClientAsync,
     DeviceCode,
@@ -24,6 +25,7 @@ from yandex_music.utils.sign_request import (
     DEFAULT_SIGN_KEY,
 )
 
+from yamusic_radio import backend
 from yamusic_radio.request import ClientRequest, retry_on_rate_limit
 
 if TYPE_CHECKING:
@@ -68,6 +70,30 @@ class ExtendTrack(Track):
                 return str(album.genre).strip()
         return ""
 
+    @property
+    def cover(self) -> str:
+        """The cover's URL with %% where the size goes, or "".
+
+        Yandex serves a cover in any size ("100x100", "400x400", ...) from
+        one address; the page picks the size it needs.
+        """
+        uri = self.cover_uri or self.og_image
+        if not isinstance(uri, str) or not uri:
+            return ""
+        return uri if uri.startswith("http") else f"https://{uri}"
+
+    def to_backend_track(self) -> backend.Track:
+        return backend.Track(
+            track_id=self.track_id,
+            title=self.title or "",
+            artists=tuple(self.artists_name()),
+            codec=self.codec,
+            bitrate_in_kbps=self.bitrate_in_kbps,
+            genre=self.genre,
+            cover=self.cover,
+            batch_id=self.batch_id,
+        )
+
 
 @model
 class DownloadInfo(YandexMusicObject):
@@ -99,7 +125,16 @@ class DownloadInfo(YandexMusicObject):
         )
 
 
+FEEDBACK_TYPES = {
+    backend.Feedback.STARTED: "trackStarted",
+    backend.Feedback.FINISHED: "trackFinished",
+    backend.Feedback.SKIPPED: "skip",
+}
+
+
 class YandexMusicPlayer(ClientAsync):
+    """The Yandex Music implementation of `backend.MusicBackend`."""
+
     _default_settings: ClassVar[dict[str, Any]] = {
         "token": None,
         "from_id": f"music-{uuid.uuid4()}",
@@ -121,6 +156,7 @@ class YandexMusicPlayer(ClientAsync):
         self.__auth_url: str | None = None
         self.__user_code: str | None = None
         self.__info_slots = Semaphore(self.DOWNLOAD_INFO_SLOTS)
+        self.__session = client_session
 
         self.__settings_path = settings_path
         try:
@@ -190,7 +226,7 @@ class YandexMusicPlayer(ClientAsync):
         return self.__auth_url
 
     @property
-    def user_code(self) -> str | None:
+    def auth_code(self) -> str | None:
         """Code for manual entry on the auth page."""
         return self.__user_code
 
@@ -213,8 +249,12 @@ class YandexMusicPlayer(ClientAsync):
         return self.__settings
 
     @property
-    def is_init(self) -> bool:
+    def authorized(self) -> bool:
         return self.__settings["token"] is not None
+
+    @property
+    def supports_moods(self) -> bool:
+        return True
 
     @property
     def _from_id(self) -> str:
@@ -226,7 +266,7 @@ class YandexMusicPlayer(ClientAsync):
         station_id: str,
         *,
         exclude_track_ids: set[str],
-    ) -> list[ExtendTrack]:
+    ) -> list[backend.Track]:
         """One batch of station tracks, ready to be downloaded."""
         station_tracks = await self.rotor_station_tracks(
             station=station_id,
@@ -260,7 +300,11 @@ class YandexMusicPlayer(ClientAsync):
         loaded = await gather(
             *(self._choose_best_dowanload_info(t) for t in candidates)
         )
-        return [t for t, ok in zip(candidates, loaded, strict=True) if ok]
+        return [
+            t.to_backend_track()
+            for t, ok in zip(candidates, loaded, strict=True)
+            if ok
+        ]
 
     async def station_settings(self, station_id: str) -> tuple[str, str, str]:
         """Return the station's (mood_energy, diversity, language)."""
@@ -299,7 +343,7 @@ class YandexMusicPlayer(ClientAsync):
     ) -> None:
         first_track = station_tracks.sequence[0].track
         if first_track is not None:
-            await self.feedback_track(
+            await self._send_feedback(
                 first_track.track_id,
                 "trackStarted",
                 station_id,
@@ -309,7 +353,7 @@ class YandexMusicPlayer(ClientAsync):
 
         last_track = station_tracks.sequence[-1].track
         if last_track is not None:
-            await self.feedback_track(
+            await self._send_feedback(
                 last_track.track_id,
                 "trackFinished",
                 station_id,
@@ -367,7 +411,7 @@ class YandexMusicPlayer(ClientAsync):
         track.quality = download_info.quality
         return True
 
-    async def get_download_links(
+    async def _get_download_links(
         self,
         track_id: str,
         codec: str,
@@ -396,7 +440,43 @@ class YandexMusicPlayer(ClientAsync):
 
         return download_info.urls
 
+    async def download(self, track: backend.Track, path: Path) -> None:
+        links = await self._get_download_links(
+            track.track_id, track.codec, track.bitrate_in_kbps
+        )
+        if not links:
+            raise RuntimeError("no download links")
+
+        async def request() -> None:
+            with path.open("wb") as out:
+                async with self.__session.get(links[0]) as resp:
+                    resp.raise_for_status()
+                    async for chunk in resp.content.iter_chunked(1 << 16):
+                        out.write(chunk)
+
+        try:
+            await retry_on_rate_limit(request)
+        except ClientError as err:
+            raise RuntimeError(f"download failed: {err!r}") from err
+
     async def feedback_track(
+        self,
+        track: backend.Track,
+        feedback: backend.Feedback,
+        station_id: str,
+        total_played_seconds: float,
+    ) -> None:
+        if not track.batch_id:
+            return
+        await self._send_feedback(
+            track.track_id,
+            FEEDBACK_TYPES[feedback],
+            station_id,
+            track.batch_id,
+            total_played_seconds,
+        )
+
+    async def _send_feedback(
         self,
         track_id: str,
         feedback: str,

@@ -39,24 +39,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from aiohttp import ClientError, ClientSession, web
+from aiohttp import web
 
 from yamusic_radio import dj_mix
+from yamusic_radio.backend import Feedback
 from yamusic_radio.dj_mix import (
     CHANNELS,
     SAMPLE_RATE,
     Pcm,
     TrackAnalysis,
 )
-from yamusic_radio.request import retry_on_rate_limit
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
 
     import numpy.typing as npt
 
+    from yamusic_radio.backend import MusicBackend, Track
     from yamusic_radio.cache import TrackCache
-    from yamusic_radio.ya_player import ExtendTrack, YandexMusicPlayer
 
 log = logging.getLogger(__name__)
 
@@ -131,20 +131,6 @@ def is_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def cover_template(track: ExtendTrack | None) -> str:
-    """Return the URL of the cover with %% where the size goes, or "".
-
-    Yandex serves a cover in any size ("100x100", "400x400", ...) from one
-    address; the page picks the size it needs.
-    """
-    if track is None:
-        return ""
-    uri = getattr(track, "cover_uri", None) or getattr(track, "og_image", None)
-    if not isinstance(uri, str) or not uri:
-        return ""
-    return uri if uri.startswith("http") else f"https://{uri}"
-
-
 @dataclass(frozen=True, slots=True)
 class BlendReport:
     """How one blend was made, to look at when it did not sound right."""
@@ -211,7 +197,7 @@ class TrackInfo:
         cls,
         title: str,
         analysis: TrackAnalysis,
-        track: ExtendTrack | None,
+        track: Track | None,
         mood: str,
         *,
         decided: bool = True,
@@ -219,7 +205,7 @@ class TrackInfo:
         return cls(
             track.track_id if track is not None else "",
             title,
-            tuple(track.artists_name()) if track is not None else (),
+            track.artists if track is not None else (),
             round(analysis.bpm, 1),
             round(analysis.loudness_db, 1),
             round((analysis.end - analysis.start) / SAMPLE_RATE, 1),
@@ -227,7 +213,7 @@ class TrackInfo:
             analysis.camelot,
             analysis.key_name,
             decided,
-            cover_template(track),
+            track.cover if track is not None else "",
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -254,7 +240,7 @@ class Candidate:
     path: Path
     analysis: TrackAnalysis
     artists: frozenset[str] = frozenset()
-    track: ExtendTrack | None = None
+    track: Track | None = None
     # The station mood the track was fetched with.
     mood: str = ""
     genre: str = ""
@@ -264,7 +250,7 @@ class Candidate:
 class Played:
     """What is kept of a track once it has been played, to repeat it."""
 
-    track: ExtendTrack
+    track: Track
     title: str
     analysis: TrackAnalysis
     artists: frozenset[str]
@@ -278,7 +264,7 @@ class Deck:
     pcm: Pcm
     analysis: TrackAnalysis
     beat_matched: bool
-    track: ExtendTrack | None = None
+    track: Track | None = None
     mood: str = ""
     # The ratio of the tempo of the track before it to its own tempo (a
     # beat-matched blend glides through it, see dj_mix.tempo_glide).
@@ -323,8 +309,7 @@ class Radio:
 
     def __init__(
         self,
-        player: YandexMusicPlayer,
-        session: ClientSession,
+        backend: MusicBackend,
         workdir: Path,
         *,
         station_id: str = DEFAULT_STATION,
@@ -333,9 +318,8 @@ class Radio:
         cache: TrackCache | None = None,
     ) -> None:
         log.info("Keys are found by %s", dj_mix.key_detector())
-        self._player = player
+        self._backend = backend
         self._cache = cache
-        self._session = session
         self._workdir = workdir
         self._station_id = station_id
         self._pool_size = pool_size
@@ -350,6 +334,8 @@ class Radio:
         self._played: OrderedDict[str, Played] = OrderedDict()
         # With the mood arc, the station's mood setting follows the set.
         self._mood_arc = mood_arc
+        # Tracks turned down for their mood, counted by the loading.
+        self._off_mood = 0
         self._mood = ""
         self._saved_settings: tuple[str, str, str] | None = None
         self._playing_id = ""
@@ -420,7 +406,9 @@ class Radio:
         They are kept on disk as well, for as long as the account has
         something else: if the radio is killed, the next run puts them back.
         """
-        self._saved_settings = await self._player.station_settings(
+        if not self._backend.supports_moods:
+            return
+        self._saved_settings = await self._backend.station_settings(
             self._station_id
         )
         self._mood = self._saved_settings[0]
@@ -434,7 +422,7 @@ class Radio:
         if self._saved_settings is None:
             return
         if self._mood != self._saved_settings[0]:
-            await self._player.set_station_settings(
+            await self._backend.set_station_settings(
                 self._station_id, *self._saved_settings
             )
             self._mood = self._saved_settings[0]
@@ -452,7 +440,7 @@ class Radio:
         left = self._cache.get_setting(SETTING_STATION)
         if isinstance(left, dict):
             try:
-                await self._player.set_station_settings(
+                await self._backend.set_station_settings(
                     str(left["station"]), *left["settings"]
                 )
             except (KeyError, TypeError, ValueError):
@@ -483,15 +471,15 @@ class Radio:
 
     @property
     def authorized(self) -> bool:
-        return bool(self._player.is_init)
+        return self._backend.authorized
 
     def auth_info(self) -> dict[str, object]:
         """Where to authorize the app, while it has no token yet."""
         authorized = self.authorized
         return {
             "authorized": authorized,
-            "url": None if authorized else self._player.auth_url,
-            "code": None if authorized else self._player.user_code,
+            "url": None if authorized else self._backend.auth_url,
+            "code": None if authorized else self._backend.auth_code,
         }
 
     @property
@@ -691,6 +679,9 @@ class Radio:
             "available": list(dj_mix.ALL_MOODS),
             "selected": list(self._allowed_moods),
             "station": self._mood,
+            # Whether the backend steers its station by the mood; if not,
+            # the radio judges the tracks by their sound.
+            "steered": self._backend.supports_moods,
         }
 
     def upcoming(self, limit: int) -> list[TrackInfo]:
@@ -741,7 +732,7 @@ class Radio:
         if self._saved_settings is None or mood == self._mood:
             return
         _, diversity, language = self._saved_settings
-        await self._player.set_station_settings(
+        await self._backend.set_station_settings(
             self._station_id, mood, diversity, language
         )
         self._mood = mood
@@ -761,7 +752,10 @@ class Radio:
                 return 1
             before = len(self._pool)
             empty_batches = 0
-            if self._mood_arc or self._allowed_moods:
+            steer = self._backend.supports_moods and (
+                self._mood_arc or bool(self._allowed_moods)
+            )
+            if steer:
                 # Tracks loaded now are played about when the pool has been
                 # worked through: aim for the mood wanted then, as far as
                 # the moods allowed go.
@@ -771,8 +765,9 @@ class Radio:
             else:
                 mood = ""
             off_genre_batches = 0
+            off_mood_batches = 0
             while (wanted := count - (len(self._pool) - before)) > 0:
-                batch = await self._player.station_batch(
+                batch = await self._backend.station_batch(
                     self._station_id,
                     exclude_track_ids=self._seen | self._off_genre,
                 )
@@ -797,8 +792,14 @@ class Radio:
                 fresh = wanted_genre[:wanted]
                 self._seen.update(t.track_id for t in fresh)
                 added = len(self._pool)
+                rejected = self._off_mood
                 await gather(*(self._prepare(t, mood) for t in fresh))
-                if len(self._pool) == added:
+                if len(self._pool) == added and self._off_mood != rejected:
+                    # Good tracks, but not of the moods wanted.
+                    off_mood_batches += 1
+                    if off_mood_batches >= MAX_OFF_GENRE_BATCHES:
+                        break
+                elif len(self._pool) == added:
                     empty_batches += 1
                     if empty_batches >= MAX_EMPTY_BATCHES:
                         break
@@ -811,7 +812,9 @@ class Radio:
         size = size or self._pool_size
         while len(self._pool) < size:
             wanted = size - len(self._pool)
-            if self._mood_arc or self._allowed_moods:
+            if self._backend.supports_moods and (
+                self._mood_arc or self._allowed_moods
+            ):
                 # A few at a time: each round has its own mood.
                 wanted = min(wanted, EXTRA_TRACKS)
             if not await self._load(wanted):
@@ -835,9 +838,9 @@ class Radio:
                 continue
             await self._consumed.wait()
 
-    async def _prepare(self, track: ExtendTrack, mood: str = "") -> None:
+    async def _prepare(self, track: Track, mood: str = "") -> None:
         async with self._slots:
-            title = f"{', '.join(track.artists_name())} - {track.title}"
+            title = f"{', '.join(track.artists)} - {track.title}"
             path = self._workdir / f"{track.track_id}.{track.codec}"
             try:
                 await self._download(track, path)
@@ -848,11 +851,17 @@ class Radio:
                     del pcm
                     self._store_analysis(track, title, analysis)
                 self._store_genre(track)
+                mood = track.mood or mood or dj_mix.mood_of(analysis)
             except CancelledError:
                 raise
             except Exception:
                 log.exception("Skip %s", title)
                 path.unlink(missing_ok=True)
+                return
+            if not self._mood_allowed(mood):
+                log.info("Skip %s: %s is not a mood wanted", title, mood)
+                path.unlink(missing_ok=True)
+                self._off_mood += 1
                 return
         log.info(
             "Ready: %s (%.1f BPM, %.1f dB, key %s)",
@@ -868,7 +877,7 @@ class Radio:
                 title,
                 path,
                 analysis,
-                frozenset(track.artists_name()),
+                frozenset(track.artists),
                 track,
                 mood,
                 track.genre,
@@ -876,7 +885,7 @@ class Radio:
         )
         self._added.set()
 
-    def _cached_analysis(self, track: ExtendTrack) -> TrackAnalysis | None:
+    def _cached_analysis(self, track: Track) -> TrackAnalysis | None:
         if self._cache is None:
             return None
         analysis = self._cache.get_analysis(track.track_id, track.codec)
@@ -885,36 +894,20 @@ class Radio:
         return analysis
 
     def _store_analysis(
-        self, track: ExtendTrack, title: str, analysis: TrackAnalysis
+        self, track: Track, title: str, analysis: TrackAnalysis
     ) -> None:
         if self._cache is not None:
             self._cache.put_analysis(
                 track.track_id, track.codec, title, analysis, track.genre
             )
 
-    def _store_genre(self, track: ExtendTrack) -> None:
+    def _store_genre(self, track: Track) -> None:
         """Keep the genre of a track whose analysis was cached before."""
         if self._cache is not None and track.genre:
             self._cache.set_genre(track.track_id, track.codec, track.genre)
 
-    async def _download(self, track: ExtendTrack, path: Path) -> None:
-        links = await self._player.get_download_links(
-            track.track_id, track.codec, track.bitrate_in_kbps
-        )
-        if not links:
-            raise RuntimeError("no download links")
-
-        async def request() -> None:
-            with path.open("wb") as out:
-                async with self._session.get(links[0]) as resp:
-                    resp.raise_for_status()
-                    async for chunk in resp.content.iter_chunked(1 << 16):
-                        out.write(chunk)
-
-        try:
-            await retry_on_rate_limit(request)
-        except ClientError as err:
-            raise RuntimeError(f"download failed: {err!r}") from err
+    async def _download(self, track: Track, path: Path) -> None:
+        await self._backend.download(track, path)
 
     def _choose(self, current: TrackAnalysis | None) -> tuple[Candidate, float]:
         """Return the best next track and what its transition costs."""
@@ -1134,30 +1127,26 @@ class Radio:
             deck.source = None
         if self._next is deck:
             self._next = None
-        self._send_feedback(deck, "trackStarted", 0.0)
+        self._send_feedback(deck, Feedback.STARTED, 0.0)
 
     def finished(self, deck: Deck) -> None:
         """Tell the station the track has been heard to the end, or skipped."""
         self._blending = False
         if self._heard_seconds is not None:
             seconds, self._heard_seconds = self._heard_seconds, None
-            self._send_feedback(deck, "skip", seconds)
+            self._send_feedback(deck, Feedback.SKIPPED, seconds)
             return
         seconds = (deck.analysis.end - deck.analysis.start) / SAMPLE_RATE
-        self._send_feedback(deck, "trackFinished", seconds)
+        self._send_feedback(deck, Feedback.FINISHED, seconds)
 
-    def _send_feedback(self, deck: Deck, kind: str, seconds: float) -> None:
+    def _send_feedback(
+        self, deck: Deck, kind: Feedback, seconds: float
+    ) -> None:
         track = deck.track
-        if track is None or not track.batch_id:
+        if track is None:
             return
         task = create_task(
-            self._player.feedback_track(
-                track.track_id,
-                kind,
-                self._station_id,
-                track.batch_id,
-                seconds,
-            )
+            self._backend.feedback_track(track, kind, self._station_id, seconds)
         )
         self._feedback_tasks.add(task)
         task.add_done_callback(self._feedback_tasks.discard)
@@ -1708,7 +1697,7 @@ def add_api(app: web.Application, radio: Radio) -> None:
         return web.json_response(radio.auth_info())
 
     def need_token() -> None:
-        # The moods are a setting of the Yandex account.
+        # The moods are a setting of the account at the backend.
         if not radio.authorized:
             raise web.HTTPServiceUnavailable(text="not authorized yet")
 
@@ -1876,8 +1865,7 @@ async def _encode_forever(
 
 
 async def serve(
-    player: YandexMusicPlayer,
-    session: ClientSession,
+    backend: MusicBackend,
     *,
     host: str,
     port: int,
@@ -1895,8 +1883,7 @@ async def serve(
     """
     with tempfile.TemporaryDirectory(prefix="yamusic-dj-") as workdir:
         radio = Radio(
-            player,
-            session,
+            backend,
             Path(workdir),
             station_id=station_id,
             pool_size=pool_size,
@@ -1912,7 +1899,7 @@ async def serve(
             ready.set()
         try:
             # Waiting for the user to authorize the app.
-            while not player.is_init:  # noqa: ASYNC110
+            while not backend.authorized:  # noqa: ASYNC110
                 await sleep(2)
             # What the last run left: a failure here must not stop the radio.
             try:

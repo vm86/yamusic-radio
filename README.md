@@ -282,8 +282,8 @@ server or a radio is another to write.
 
    ```python
    BackendSpec(
-       "subsonic",                       # the id
-       "Subsonic",                       # the name in the API
+       "subsonic",  # the id
+       "Subsonic",  # the name in the API
        lambda: SubsonicBackend(options.subsonic_url, session),
        lambda: bool(options.subsonic_url),  # configured: on without being asked
    )

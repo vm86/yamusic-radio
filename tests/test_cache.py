@@ -184,9 +184,7 @@ def test_analysis_without_a_key_is_made_again_by_essentia(
     keyless = dataclasses.replace(ANALYSIS, key=-1)
     cache.put_analysis("1", "mp3", "A - B", keyless)
 
-    monkeypatch.setattr(
-        "yamusic_radio.cache.key_detector", lambda: "essentia"
-    )
+    monkeypatch.setattr("yamusic_radio.cache.key_detector", lambda: "essentia")
     assert cache.get_analysis("1", "mp3") is None
 
     monkeypatch.setattr(

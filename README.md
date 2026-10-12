@@ -1,8 +1,8 @@
 # yamusic-radio
 
-Endless DJ radio from a music service. Takes tracks from a Yandex Music
-station (or from any other service you add as a [backend](#adding-a-music-backend),
-several at once), beat-matches them (bass swap, three-band EQ blend, filter
+Endless DJ radio. Takes tracks from a Yandex Music station and/or from a
+folder of audio files (or from any other source you add as a
+[backend](#adding-a-music-backend)), several at once, beat-matches them (bass swap, three-band EQ blend, filter
 sweeps, optional effects) and streams one continuous mix over HTTP: MP3 at
 320 kbit/s with ICY titles, and a lossless FLAC stream.
 
@@ -22,10 +22,24 @@ several on, their tracks go into one pool and the radio picks the best fit
 among them. A backend is on when it is asked for (`--backend ID`, repeatable,
 or the page, or `PUT /api/auth/backend`), when it was on in the last run, or
 when it is already signed in (has a saved token). Until one is on the radio
-waits and the page offers them. Only `yandex` comes with the program. A backend
+waits and the page offers them. Two come with the program: `yandex` and `local` (a folder of audio files). A backend
 that fails is left alone for a while (30 s, doubling up to 10 min) and the
 others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
+
+**Local folder.** `--local-dir ~/Music` turns the `local` backend on with that
+folder; the page can choose and change the folder too (it is a field of the
+backend's sign-in), and the choice is kept in the cache settings, so a restart
+plays from it again (without `--no-cache`). It plays the audio files under the
+folder (`mp3`, `flac`, `m4a`, `aac`, `ogg`, `opus`, `wav`, `aiff`, `wma`;
+hidden files and folders are skipped) in random order, a few at a time, and
+plays a track again only when all the others were heard. Files are linked, not
+copied, so a library costs no disk. Title, artist and genre are read from the
+tags with `ffmpeg`, only for the tracks that are asked for; without tags the
+file name is the title and the folder the artist. The station is the whole
+folder (`shuffle`), or a subfolder of it (`--station local=Jazz`). The list of
+files is made again every 10 minutes. The backend has no moods: the radio
+judges the tracks by their sound.
 
 On the first run of the Yandex backend the URL and the code of the OAuth
 device flow are in the log and at `GET /api/auth` (the server is already up,
@@ -205,7 +219,7 @@ Served next to the stream, no authentication.
 | `POST /api/pause`, `POST /api/resume` | Pause the mix for everyone, and go on. The time of the playing track does not run meanwhile. Answer `{"paused": true, "pause_reason": "user"}`, or `{"paused": false, "pause_reason": null}` after a resume. |
 | `GET /api/spectrum?l=NAME` | The spectrum of the mix as server-sent events (`text/event-stream`, CORS `*`): 12 bands (30 Hz to 16 kHz, log-spaced, a little tilted up towards the treble), about 30 times a second. First `event: start` with `{"position": SECONDS}`: where in the mix the player of the page starts (`null` if it did not connect within 5 s). Then each value is `data: {"t": 12.345, "b": [0..1, ...]}`: `t` is the position in the mix, `b` the levels of the bands (0 at -60 dBFS, 1 at full scale). `: keepalive` comments come every 15 s. Frames are sent a little ahead (the player hears the sound ~3 s after the mix made it): show each one when the player gets to `start + t`. |
 | `GET /api/transitions` | The last 10 blends, the newest last: `from`, `to`, `kind`, `effect`, `beat_matched`, `from_bpm`, `to_bpm`, `glide` (how far the tempo glided, `0.05` is 5% faster), `seconds`, `loudness_gap_db`, `key_relation`, `over_db` (how far above the limiter's ceiling the blend peaked before it was limited) and `at`. To look at a transition that did not sound right. |
-| `GET /api/auth` | `authorized` (a backend can give tracks), and while it cannot, what to do to sign in: the `url` to open and the `code` to enter there (both `null` once authorized, or until the service has given them) and `fields` (`{"name", "label", "secret"}`: values to type, `[]` for a device flow). `backends` lists every backend with the same keys plus `id`, `name`, `enabled` and `available` (signed in and not resting after failures). The server is up during authorization. |
+| `GET /api/auth` | `authorized` (a backend can give tracks), and while it cannot, what to do to sign in: the `url` to open and the `code` to enter there (both `null` once authorized, or until the service has given them) and `fields` (`{"name", "label", "secret"}`: values to type, `[]` for a device flow). `backends` lists every backend with the same keys plus `id`, `name`, `enabled`, `available` (signed in and not resting after failures), and for a backend with settings (`local`: its folder) `settings` (the values now) and `setting_fields` (what they are called), which `POST /api/auth` changes. The server is up during authorization. |
 | `POST /api/auth` `{"backend": "id", "values": {"login": "..."}}` | Sign in with the values of the `fields` of the backend (without `backend`, of the radio's own). Answers like `GET /api/auth`; 400 if the backend turns them down. |
 | `PUT /api/auth/backend` `{"backend": "id"}` | Turn the backend on; it starts signing in if it needs to. Answers like `GET /api/auth`; 400 for an unknown id. |
 | `DELETE /api/auth/backend/{id}` | Turn the backend off. The tracks it gave already stay in the pool. Answers like `GET /api/auth`; 404 for an unknown id. |
@@ -238,8 +252,9 @@ curl -s -X PUT localhost:8000/api/moods -d '{"moods":["calm","fun"]}'
 
 The DJ only talks to a `MusicBackend` (`yamusic_radio/backend.py`): it asks
 for batches of tracks from a "station", downloads them to files, and tells
-the backend what was heard. Yandex Music is one implementation
-(`ya_player.py`); a Subsonic server, a radio or a folder of files is another.
+the backend what was heard. Yandex Music (`ya_player.py`) and a folder of audio files
+(`local.py`, a short one to read first) are two implementations; a Subsonic
+server or a radio is another to write.
 
 1. **Write a class** with the methods of the `MusicBackend` protocol:
 
@@ -262,6 +277,11 @@ the backend what was heard. Yandex Music is one implementation
    pass (the service is down): the other backends carry on. Anything else is a
    bug and is not caught.
 
+   A backend with settings the page can change (the folder of `local`) also
+   has `settings` (the values now) and `setting_fields` (what they are called,
+   `AuthField`s), the `Configurable` protocol; the new values come to
+   `authorize()`, which keeps them. The page shows them from `GET /api/auth`.
+
 2. **Register it** in `backend_specs()` in `yamusic_radio/main.py`, and add its
    id to `BACKEND_IDS` (the choices of `--backend` and `--station`):
 
@@ -273,6 +293,9 @@ the backend what was heard. Yandex Music is one implementation
        lambda: bool(options.subsonic_url),  # configured: on without being asked
    )
    ```
+
+   `local` is registered the same way, with the folder from `--local-dir` or
+   the settings.
 
    The track ids are stored as `<id>:<track_id>` in the cache and the API, so
    that ids of different backends never meet; `plain_ids=True` leaves them as

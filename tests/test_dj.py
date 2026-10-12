@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import dataclasses
 import itertools
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -1115,18 +1114,6 @@ async def test_rest_api(
     app = dj.make_app(dj.Broadcaster(), radio)
 
     async with TestClient(TestServer(app)) as client:
-        page = await client.get("/")
-        assert page.status == 200
-        assert page.content_type == "text/html"
-        text = await page.text()
-        assert "Яндекс Музыка DJ" in text
-        # Every script and style the page names is served.
-        paths = re.findall(r'(?:src|href)="\./(assets/[^"]+)"', text)
-        assert paths
-        for path in paths:
-            asset = await client.get(f"/{path}")
-            assert asset.status == 200, path
-
         queue = await (await client.get("/api/queue?next=2")).json()
         assert queue["now"]["title"] == deck.title
         assert 0 <= queue["now"]["elapsed_seconds"] < 5
@@ -4986,35 +4973,9 @@ def test_what_the_command_line_turns_on_is_kept() -> None:
 
 
 @pytest.mark.asyncio
-async def test_without_the_page_there_is_the_stream_and_the_api_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
-    hub = dj.Broadcaster()
-    hub.publish(fake_mp3(5))
-    app = dj.make_app(hub, radio, page=False)
-
-    async with TestClient(TestServer(app)) as client:
-        assert dj.web_page_built()  # this one has it, and doesn't serve it
-        root = await client.get("/")
-        assert root.status == 404
-        assert (await root.json())["api"] == "/api/queue"
-        assert (await client.get("/assets/anything.js")).status == 404
-        assert (await client.get("/api/queue")).status == 200
-        stream = await client.get("/stream")
-        assert stream.status == 200
-        stream.close()
-
-
-@pytest.mark.asyncio
-async def test_a_build_with_no_page_says_so_at_the_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(dj, "WEB_PAGE", tmp_path / "web" / "index.html")
-    monkeypatch.setattr(dj, "WEB_DIR", tmp_path / "web")
+async def test_the_root_says_there_is_no_page() -> None:
     app = dj.make_app(dj.Broadcaster())
 
-    assert not dj.web_page_built()
     async with TestClient(TestServer(app)) as client:
         root = await client.get("/")
         assert root.status == 404

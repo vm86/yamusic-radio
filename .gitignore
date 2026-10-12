@@ -54,6 +54,3 @@ yamusic_radio/_version.py
 
 # coverage
 *.coverage
-
-# frontend
-frontend/node_modules/

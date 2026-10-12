@@ -148,9 +148,6 @@ KNOWN_GENRES = (
 MAX_RECENT_BLENDS = 10
 # A beat grid of a blend needs at least this many points to give a period.
 MIN_BEATS_IN_GRID = 2
-# The page the radio shows at /.
-WEB_DIR = Path(__file__).parent / "web"
-WEB_PAGE = WEB_DIR / "index.html"
 # Tracks played before a restart that the radio does not pick again.
 CACHED_PLAYED_SKIPPED = 200
 # The next track is chosen and decoded this long before the blend.
@@ -2787,40 +2784,16 @@ def add_api(
     _add_stats_api(app, radio)
 
 
-def web_page_built() -> bool:
-    """Say whether this build has the page (a backend-only one has not)."""
-    return WEB_PAGE.is_file()
+def _add_root(app: web.Application) -> None:
+    """Add the root, which says that there is the stream and the API only."""
 
-
-def _add_web_page(app: web.Application, *, serve: bool = True) -> None:
-    """Add the page and its scripts, built by `npm run build` in frontend/.
-
-    Without them (a backend-only build, or --no-web) the stream and the API
-    are all there is, and the root says so.
-    """
-
-    async def no_page(_: web.Request) -> web.Response:
+    async def root(_: web.Request) -> web.Response:
         return web.json_response(
             {"web": False, "stream": "/stream", "api": "/api/queue"},
             status=404,
         )
 
-    if not serve or not web_page_built():
-        app.router.add_get("/", no_page)
-        return
-
-    async def index(_: web.Request) -> web.Response:
-        return web.Response(
-            body=WEB_PAGE.read_bytes(),
-            content_type="text/html",
-            charset="utf-8",
-            # The page names its scripts by hash: always ask for a fresh one.
-            headers={"Cache-Control": "no-cache"},
-        )
-
-    app.router.add_get("/", index)
-    if (WEB_DIR / "assets").is_dir():
-        app.router.add_static("/assets", WEB_DIR / "assets")
+    app.router.add_get("/", root)
 
 
 def _stream_handler(
@@ -2934,7 +2907,6 @@ def make_app(
     spectrum: SpectrumFeed | None = None,
     *,
     ogg: Broadcaster | None = None,
-    page: bool = True,
 ) -> web.Application:
     app = web.Application()
     starts = StartPositions()
@@ -2958,7 +2930,7 @@ def make_app(
         )
     if spectrum is not None:
         _add_spectrum_api(app, spectrum, starts)
-    _add_web_page(app, serve=page)
+    _add_root(app)
     if radio is not None:
         add_api(app, radio, backends)
     return app
@@ -3202,7 +3174,6 @@ async def serve(
     mood_arc: bool = False,
     cache: TrackCache | None = None,
     tracks_dir: Path | None = None,
-    page: bool = True,
     ready: Event | None = None,
 ) -> None:
     """Serve the stream and the API, then mix until cancelled.
@@ -3210,8 +3181,7 @@ async def serve(
     The server is up before the app is authorized, so that /api/auth can
     tell where to do it. With a cache and a `tracks_dir`, the tracks loaded
     and waiting are kept there across restarts; without, they are in a
-    directory that goes with the run. Without `page` the web page is not
-    served, whether the build has it or not.
+    directory that goes with the run.
     """
     keep = cache is not None and tracks_dir is not None
     if keep and tracks_dir is not None:
@@ -3253,7 +3223,6 @@ async def serve(
                 lossless,
                 spectrum,
                 ogg=ogg,
-                page=page,
             ),
             access_log=None,
         )

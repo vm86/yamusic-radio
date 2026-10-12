@@ -1,3 +1,2 @@
 recursive-include yamusic_radio/contrib *.service
-recursive-include yamusic_radio/web *
 recursive-include yamusic_radio *.py

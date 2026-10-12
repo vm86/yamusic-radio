@@ -20,11 +20,11 @@ python -m venv .venv && .venv/bin/pip install -e ".[test,lint]"
 **Music backends.** The tracks come from the backends that are on; with
 several on, their tracks go into one pool and the radio picks the best fit
 among them. A backend is on when it is asked for (`--backend ID`, repeatable,
-or the page, or `PUT /api/auth/backend`) or when it was on in the last run. On
+or the API, `PUT /api/auth/backend`) or when it was on in the last run. On
 the very first run, when nothing is remembered yet, a backend that is already
 signed in (has a saved token) is on too. After that a backend that was turned
-off on the page stays off, signed in or not; what the command line turned on
-is remembered. Until one is on the radio waits and the page offers them. When
+off through the API stays off, signed in or not; what the command line turned on
+is remembered. Until one is on the radio waits and `GET /api/auth` offers them. When
 a backend is turned off, or cannot be reached, its tracks that are only linked
 (a folder's) leave the queue, and so does its decoded next track. Two come with the program: `yandex` and `local` (a folder of audio files). A backend
 that fails is left alone for a while (30 s, doubling up to 10 min) and the
@@ -32,8 +32,8 @@ others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
 
 **Local folder.** `--local-dir ~/Music` turns the `local` backend on with that
-folder; the page can choose and change the folder too (it is a field of the
-backend's sign-in), and the choice is kept in the cache settings, so a restart
+folder; the API can choose and change the folder too (it is a field of the
+backend's sign-in, `POST /api/auth`), and the choice is kept in the cache settings, so a restart
 plays from it again (without `--no-cache`). It plays the audio files under the
 folder (`mp3`, `flac`, `m4a`, `aac`, `ogg`, `opus`, `wav`, `aiff`, `wma`;
 hidden files and folders are skipped) in random order, a few at a time, and
@@ -82,7 +82,7 @@ The streams carry the same mix and are always on (the radio runs an
 |---|---|---|
 | `/stream` | MP3, 320 kbit/s (`MP3_BITRATE` in `dj.py`; `libmp3lame`) | With ICY titles (`Icy-MetaData: 1`). Plays in any player. |
 | `/stream.flac` | FLAC, lossless, 16 bit | The mix is dithered to 16 bit (triangular dither, as for a CD). No titles: the stream carries no tags. About 110 kB a second, so mind the network. |
-| `/stream.ogg` | The same FLAC in an Ogg container | For Safari and every browser on iOS: they play a live stream of FLAC in Ogg, not of bare FLAC. The page picks it by itself when the lossless stream is asked for there. No titles. |
+| `/stream.ogg` | The same FLAC in an Ogg container | For Safari and every browser on iOS: they play a live stream of FLAC in Ogg, not of bare FLAC. A client picks it for those browsers. No titles. |
 
 A new listener gets the latest 3 s of the stream at once (from a frame
 boundary; a FLAC listener gets the stream header first), so the player can
@@ -96,7 +96,7 @@ on with the first listener; `POST /api/pause` holds it for everyone until
 `POST /api/resume`.
 
 The stream has no authentication: bind only to trusted networks (`--host`).
-`/stream` is sent with `Access-Control-Allow-Origin: *`, so a page of another
+`/stream` is sent with `Access-Control-Allow-Origin: *`, so a client of another
 origin can play it in an `<audio crossorigin>` and analyze the sound with Web
 Audio.
 
@@ -165,29 +165,16 @@ stay on neighbouring keys (a fifth of them would by chance).
 - **Filter sweep**: everything else (no shared beat grid, or a big jump in
   loudness).
 
-## Web page
+## No web page
 
-`http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
-play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the lossless stream (remembered; Safari and iOS get it as FLAC in Ogg), the language of the music (Yandex backend) and volume, the current track with its progress and, under the cover, the spectrum of the mix (12 bars, in time with the sound), the previous and
-the next tracks (a menu on each of the coming ones moves it, takes it out of the queue or plays it next), mood chips, the genres (tabs *Play* and *Never play*), the
-transition statistics, and the backends: which are on, the sign-in of each
-(the code of a device flow, or the fields it asks for). The theme is light,
-dark or the system's, set by the button in the top bar (each press: system,
-light, dark) and remembered. The page is in Russian or English, by the system
-language by default, and the button in the top bar changes it.
-
-It is a Vue 3 + TypeScript app in `frontend/`. The build goes into
-`yamusic_radio/web/` and **is committed**, so that the package, the RPM
-and the image need no Node.js. After a change in `frontend/`:
-
-```bash
-cd frontend
-npm ci
-npm run build      # type check + build into ../yamusic_radio/web
-npm test           # vitest
-npm run dev        # Vite with a proxy to the radio on 127.0.0.1:8000
-npm run dev:remote # the same with the API of another radio (RADIO_URL=https://radio.example.com)
-```
+The radio has no page of its own: it serves the streams and the REST API
+only, and `GET /` answers 404 with `{"web": false, "stream": "/stream",
+"api": "/api/queue"}`. A page, an app or a script does the rest through the
+API: the backends and their sign-in (`/api/auth`), the queue and the next
+track button (`/api/queue`, `/api/next`, `/api/pause`), the moods, the genres
+and the language, the statistics and the spectrum. A client of another origin
+may play the streams and read the API: the streams and `/api/spectrum` are
+sent with `Access-Control-Allow-Origin: *`.
 
 ## Spectrum
 
@@ -221,9 +208,9 @@ Served next to the stream, no authentication.
 | `PUT /api/genres` `{"genres": ["house"]}` | Pick genres. Nothing is rebuilt: they come into force with the next `POST /api/queue/refresh`. `DELETE /api/genres` picks any. |
 | `PUT /api/genres/blocked` `{"genres": ["rap"]}` | Genres never to play (they win over the picked ones); `blocked` and `blocked_applied` in `GET /api/genres`. Kept in the cache, in force with the next refresh like the picked ones. `DELETE /api/genres/blocked` clears them. |
 | `GET /api/stats` | How the tracks were blended: `session` (this run) and `all_time` (from the cache, `null` without one), each with `total`, `beat_matched`, `by_type` (`bass swap`, `eq blend`, `filter sweep`, `crossfade`: what was really made, a blend too short for a filtered one is a crossfade), `by_effect` (`none`, `drop`: a riser and a boom, `echo`: an echo-out; `unknown` for blends made before the effects were counted) and `by_key` (`same`, `neighbour`, `boost`, `semitone`, `down`, `diagonal`, `clash`, `unknown`) and `by_quality` (the same, summed up: `good` is `same` and `neighbour`, `fair` is `boost`, `semitone`, `down` and `diagonal`, `poor` is `clash`). |
-| `GET /api/stats/keys` | Every change of key there was, with how often: `session` and `all_time` (`null` without a cache), each a list of `{"from": "8A", "to": "9A", "relation", "quality", "count"}`, the most common first. A key that was not found is `null`. The page does not show it. |
+| `GET /api/stats/keys` | Every change of key there was, with how often: `session` and `all_time` (`null` without a cache), each a list of `{"from": "8A", "to": "9A", "relation", "quality", "count"}`, the most common first. A key that was not found is `null`. |
 | `POST /api/next` | The next track now: it needs the next track to be ready, and the blend starts on the first bar line of the playing track at least 2 s ahead, as smooth as any other (16 beats; the tempo glides, bass swap / EQ blend / sweep). Answers 202 with the queue (`skip_pending: true` until the blend has begun), 409 if nothing plays yet or a transition is already under way. The station is told the track was skipped. |
-| `GET /api/next` | Where the next track button is: `skip_pending` (asked for, waiting for a good beat), `blending` (the blend is under way, until the old track is left behind) and `can_skip` (something plays and neither of the two). The page drives the button by this. |
+| `GET /api/next` | Where the next track button is: `skip_pending` (asked for, waiting for a good beat), `blending` (the blend is under way, until the old track is left behind) and `can_skip` (something plays and neither of the two). A client drives its button by this. |
 | `POST /api/pause`, `POST /api/resume` | Pause the mix for everyone, and go on. The time of the playing track does not run meanwhile. Answer `{"paused": true, "pause_reason": "user"}`, or `{"paused": false, "pause_reason": null}` after a resume. |
 | `GET /api/spectrum?l=NAME` | The spectrum of the mix as server-sent events (`text/event-stream`, CORS `*`): 12 bands (30 Hz to 16 kHz, log-spaced, a little tilted up towards the treble), about 30 times a second. First `event: start` with `{"position": SECONDS}`: where in the mix the player of the page starts (`null` if it did not connect within 5 s). Then each value is `data: {"t": 12.345, "b": [0..1, ...]}`: `t` is the position in the mix, `b` the levels of the bands (0 at -60 dBFS, 1 at full scale). `: keepalive` comments come every 15 s. Frames are sent a little ahead (the player hears the sound ~3 s after the mix made it): show each one when the player gets to `start + t`. |
 | `GET /api/transitions` | The last 10 blends, the newest last: `from`, `to`, `kind`, `effect`, `beat_matched`, `from_bpm`, `to_bpm`, `glide` (how far the tempo glided, `0.05` is 5% faster), `seconds`, `loudness_gap_db`, `key_relation`, `over_db` (how far above the limiter's ceiling the blend peaked before it was limited) and `at`. To look at a transition that did not sound right. |
@@ -285,10 +272,10 @@ server or a radio is another to write.
    pass (the service is down): the other backends carry on. Anything else is a
    bug and is not caught.
 
-   A backend with settings the page can change (the folder of `local`) also
+   A backend with settings the API can change (the folder of `local`) also
    has `settings` (the values now) and `setting_fields` (what they are called,
    `AuthField`s), the `Configurable` protocol; the new values come to
-   `authorize()`, which keeps them. The page shows them from `GET /api/auth`.
+   `authorize()`, which keeps them. They are shown by `GET /api/auth`.
 
 2. **Register it** in `backend_specs()` in `yamusic_radio/main.py`, and add its
    id to `BACKEND_IDS` (the choices of `--backend` and `--station`):
@@ -296,7 +283,7 @@ server or a radio is another to write.
    ```python
    BackendSpec(
        "subsonic",                       # the id
-       "Subsonic",                       # the name on the page
+       "Subsonic",                       # the name in the API
        lambda: SubsonicBackend(options.subsonic_url, session),
        lambda: bool(options.subsonic_url),  # configured: on without being asked
    )
@@ -310,7 +297,7 @@ server or a radio is another to write.
    they are (only for a backend whose ids were already in the cache).
 
 3. **Test it** the way `tests/test_dj.py` does: a small fake backend, no network.
-   The page needs no change: the backends, their sign-in fields and codes come
+   Nothing else needs a change: the backends, their sign-in fields and codes come
    from `GET /api/auth`.
 
 ## Development

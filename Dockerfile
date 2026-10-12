@@ -6,11 +6,7 @@ FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION} AS build
 # There is no .git in the build context, so setuptools-scm can't tell the
 # version; pass it in: docker build --build-arg VERSION=1.2.3 .
 ARG VERSION=0.0.0
-# docker build --build-arg BACKEND_ONLY=1 . leaves the web page out of the
-# image: the stream and the API only.
-ARG BACKEND_ONLY=
-ENV YAMUSIC_BACKEND_ONLY=${BACKEND_ONLY} \
-    SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION} \
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION} \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
@@ -18,7 +14,7 @@ RUN dnf install -y --setopt=install_weak_deps=False python3 python3-pip \
     && dnf clean all
 
 WORKDIR /src
-COPY pyproject.toml setup.py README.md LICENSE COPYING.LESSER MANIFEST.in ./
+COPY pyproject.toml README.md LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yamusic_radio ./yamusic_radio
 # Essentia finds the keys; it has wheels for x86_64 only, elsewhere the
 # program falls back to a simpler (and worse) key detection.

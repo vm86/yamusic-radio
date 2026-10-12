@@ -53,7 +53,7 @@ include-package-data = true
 include = ["yamusic_radio", "yamusic_radio.*"]
 
 [tool.setuptools.package-data]
-"yamusic_radio" = ["contrib/*", "web/*", "web/assets/*"]
+"yamusic_radio" = ["contrib/*"]
 
 [tool.setuptools_scm]
 version_file = "yamusic_radio/_version.py"
@@ -124,9 +124,3 @@ pretty = true
 [[tool.mypy.overrides]]
 module = ["essentia", "essentia.*"]
 ignore_missing_imports = true
-
-# setuptools has no stubs here: setup.py only makes the web page optional.
-[[tool.mypy.overrides]]
-module = ["setuptools", "setuptools.*", "setup"]
-ignore_missing_imports = true
-disallow_subclassing_any = false

@@ -4809,20 +4809,59 @@ async def test_a_link_to_what_is_gone_is_given_up_whatever_the_backend(
     assert len(radio.pool) == 3
 
 
+async def decoded_next(
+    radio: dj.Radio, track_id: str
+) -> tuple[dj.Deck, dj.Deck]:
+    """Play "a", and have the track of the id decoded to come after it."""
+    radio.queue_order(["a"])
+    now = await radio.next_deck(None)
+    radio.started(now)
+    radio.queue_order([track_id])
+    return now, await radio.next_deck(now.analysis)
+
+
 @pytest.mark.asyncio
-async def test_the_decoded_next_track_plays_even_if_its_backend_is_gone(
+async def test_the_decoded_next_track_of_a_backend_that_went_is_given_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
-    now = await radio.next_deck(None)
-    radio.started(now)
-    decoded = await radio.next_deck(now.analysis)  # in memory
+    _, decoded = await decoded_next(radio, "two:c")
+    assert next_ids(radio)[0] == "two:c"
+
+    await multi.disable("two")
+    radio.backends_changed()
+
+    assert radio.is_stale(decoded)  # the mix chooses again
+    assert next_ids(radio) == ["b"]  # nothing of the backend is left
+
+
+@pytest.mark.asyncio
+async def test_the_decoded_next_track_of_another_backend_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+    _, decoded = await decoded_next(radio, "b")
 
     await multi.disable("two")
     radio.backends_changed()
 
     assert not radio.is_stale(decoded)
-    assert next_ids(radio)[0] == decoded.track.track_id  # type: ignore[union-attr]
+    assert next_ids(radio) == ["b"]
+
+
+@pytest.mark.asyncio
+async def test_the_track_being_blended_in_stays_whatever_happens_to_its_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+    now, decoded = await decoded_next(radio, "two:c")
+    radio.transition(dj_mix.Transition.BASS_SWAP, now, decoded)
+
+    await multi.disable("two")
+    radio.backends_changed()
+
+    assert next_ids(radio)[0] == "two:c"
+    assert not radio.is_stale(decoded)
 
 
 @pytest.mark.asyncio
@@ -4882,3 +4921,65 @@ async def test_refreshing_leaves_the_track_being_blended_in(
     # It is being heard: not given back to the pool, to be played again.
     assert next_ids(radio)[0] == second.title
     assert second.title not in [c.title for c in radio.pool]
+
+
+@pytest.mark.asyncio
+async def test_a_backend_turned_off_stays_off_though_it_is_signed_in() -> None:
+    made: dict[str, FakeBackend] = {}
+    saved: list[list[str]] = []
+    multi = MultiBackend(
+        specs(made, [], [], configured=("one", "two")),
+        on_change=saved.append,
+    )
+    assert sorted(made) == ["one", "two"]  # nothing known: signed in is on
+
+    await multi.disable("two")
+    assert saved == [["one"]]
+
+    # The next run knows what was on, and goes by that.
+    again: dict[str, FakeBackend] = {}
+    MultiBackend(
+        specs(again, [], [], configured=("one", "two")),
+        enabled=saved[-1],
+        auto=False,
+    )
+    assert list(again) == ["one"]
+    nothing: dict[str, FakeBackend] = {}
+    MultiBackend(
+        specs(nothing, [], [], configured=("one", "two")),
+        enabled=[],
+        auto=False,
+    )
+    assert nothing == {}  # all of them were turned off
+
+
+def test_what_was_on_is_kept_and_asked_for_again(
+    track_cache: TrackCache,
+) -> None:
+    from yamusic_radio import main  # noqa: PLC0415
+
+    assert main._last_backends(None) is None  # noqa: SLF001
+    assert main._last_backends(track_cache) is None  # noqa: SLF001, nothing yet
+
+    track_cache.put_setting("backend", "yandex")  # the older setting
+    assert main._last_backends(track_cache) == ["yandex"]  # noqa: SLF001
+
+    track_cache.put_setting("backends", ["local", 7])
+    assert main._last_backends(track_cache) == ["local"]  # noqa: SLF001
+    track_cache.put_setting("backends", [])  # all are off, and it is known
+    assert main._last_backends(track_cache) == []  # noqa: SLF001
+
+
+def test_what_the_command_line_turns_on_is_kept() -> None:
+    made: dict[str, FakeBackend] = {}
+    saved: list[list[str]] = []
+    multi = MultiBackend(
+        specs(made, [], [], configured=()),
+        enabled=["two"],
+        auto=False,
+        on_change=saved.append,
+    )
+
+    multi.persist()
+
+    assert saved == [["two"]]

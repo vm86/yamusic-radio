@@ -71,6 +71,7 @@ class MultiBackend:
         specs: Sequence[BackendSpec],
         *,
         enabled: Sequence[str] = (),
+        auto: bool = True,
         stations: Mapping[str, str] | None = None,
         on_change: Callable[[list[str]], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -83,8 +84,11 @@ class MultiBackend:
         self._last = ""
         # Set when a backend is turned on or off.
         self._changed_event = asyncio.Event()
+        # With `auto`, a backend that has what it needs (a token, a folder)
+        # is on without being asked. Not when the ones that were on are
+        # known: then a backend that was turned off stays off.
         for spec in specs:
-            if spec.id in enabled or spec.configured():
+            if spec.id in enabled or (auto and spec.configured()):
                 self._start(spec.id)
 
     def _start(self, backend_id: str) -> None:
@@ -100,6 +104,10 @@ class MultiBackend:
     def _changed(self) -> None:
         if self._on_change is not None:
             self._on_change(list(self._running))
+
+    def persist(self) -> None:
+        """Keep which backends are on, as they are now."""
+        self._changed()
 
     async def enable(self, backend_id: str) -> None:
         """Turn the backend on, and start signing in if it needs that."""

@@ -238,14 +238,15 @@ def backend_specs(
     ]
 
 
-def _last_backends(cache: TrackCache | None) -> list[str]:
-    """List the backends that were on in the last run."""
+def _last_backends(cache: TrackCache | None) -> list[str] | None:
+    """List the backends that were on in the last run, None if not known."""
     if cache is None:
-        return []
+        return None
     ids = cache.get_setting(SETTING_BACKENDS)
-    if not isinstance(ids, list):
-        ids = [cache.get_setting(SETTING_BACKEND)]
-    return [i for i in ids if isinstance(i, str)]
+    if isinstance(ids, list):
+        return [i for i in ids if isinstance(i, str)]
+    old = cache.get_setting(SETTING_BACKEND)
+    return [old] if isinstance(old, str) else None
 
 
 def _stations(values: list[str], first: str) -> dict[str, str]:
@@ -279,13 +280,17 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     if cache is not None and options.local_dir is not None:
         cache.put_setting(SETTING_LOCAL_DIRECTORY, str(options.local_dir))
     specs = backend_specs(options, session, cache)
+    last = _last_backends(cache)
+    asked = [
+        *(options.backend or ()),
+        *(["local"] if options.local_dir is not None else []),
+    ]
     backend = MultiBackend(
         specs,
-        enabled=[
-            *(options.backend or ()),
-            *(["local"] if options.local_dir is not None else []),
-            *_last_backends(cache),
-        ],
+        enabled=[*asked, *(last or [])],
+        # Once it is known what was on, a backend that was turned off stays
+        # off, signed in or not.
+        auto=last is None,
         stations=_stations(options.station, specs[0].id),
         on_change=(
             None
@@ -293,6 +298,8 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
             else lambda ids: cache.put_setting(SETTING_BACKENDS, ids)
         ),
     )
+    if asked:
+        backend.persist()  # what the command line turned on is kept, too
     ready = asyncio.Event()
     serve_task = asyncio.create_task(
         dj.serve(

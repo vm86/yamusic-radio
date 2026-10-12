@@ -1006,6 +1006,15 @@ class Radio:
 
     def _drop_unwanted(self) -> None:
         """Forget the pool tracks of other moods or genres, or out of reach."""
+        decoded = self._next.source if self._next is not None else None
+        if (
+            decoded is not None
+            and not self._blending
+            and not self._reachable(decoded)
+        ):
+            # Chosen and decoded already, but of a backend that went: it
+            # goes back to the pool, to be given up like the others.
+            self._restart_next()
         for candidate in list(self._pool):
             if not self._wanted(candidate):
                 self._pool.remove(candidate)

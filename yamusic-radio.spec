@@ -42,11 +42,24 @@ else
     collect=""
 fi
 printf 'from yamusic_radio.main import main\n\nmain()\n' > %{_builddir}/launcher.py
+# --strip drops the debug symbols (Essentia alone is 41 MB with them),
+# --optimize 2 the asserts and docstrings; the modules left out are not used.
 %{_builddir}/venv/bin/pyinstaller --noconfirm --clean --onefile \
+    --strip --optimize 2 \
     --name yamusic-dj \
     --distpath %{_builddir}/dist --workpath %{_builddir}/work \
     --specpath %{_builddir} \
     --collect-submodules yandex_music --collect-data yamusic_radio \
+    --exclude-module tkinter --exclude-module unittest \
+    --exclude-module pydoc --exclude-module doctest \
+    --exclude-module distutils --exclude-module setuptools \
+    --exclude-module pkg_resources --exclude-module test \
+    --exclude-module lib2to3 --exclude-module xmlrpc \
+    --exclude-module curses --exclude-module readline \
+    --exclude-module IPython --exclude-module matplotlib \
+    --exclude-module scipy --exclude-module pytest \
+    --exclude-module numpy.f2py --exclude-module numpy.testing \
+    --exclude-module numpy.distutils \
     $collect %{_builddir}/launcher.py
 
 %install

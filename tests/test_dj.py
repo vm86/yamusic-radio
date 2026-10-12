@@ -4657,3 +4657,47 @@ async def test_the_queue_is_changed_in_the_api(
             "/api/queue/order", json={"track_ids": ["zzz"]}
         )
         assert missing.status == 404
+
+
+class QueueChangedRadio(FakeRadio):
+    """A radio whose decks are given up for others when it is told so."""
+
+    def __init__(self, decks: list[dj.Deck]) -> None:
+        super().__init__(decks)
+        self.given_up: set[str] = set()
+
+    def is_stale(self, deck: dj.Deck) -> bool:
+        return deck.title in self.given_up
+
+
+@pytest.mark.asyncio
+async def test_a_deck_given_up_near_the_blend_is_changed_for_another() -> None:
+    radio = QueueChangedRadio(
+        [
+            deck("one", 120, 0.3, matched=False),
+            deck("two", 120, 0.17, matched=True),
+            deck("three", 120, 0.4, matched=True),
+        ]
+    )
+    pieces: list[tuple[np.ndarray, str]] = []
+
+    async def play() -> None:
+        async for piece in dj.mix(radio):
+            pieces.append(piece)
+            played = sum(len(p) for p, t in pieces if t == "one") / SR
+            if played > 60:  # past the look-ahead: "two" is chosen and waits
+                radio.given_up.add("two")  # the queue was changed by hand
+            await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="out of tracks"):
+        await play()
+
+    titles = [title for _, title in pieces]
+    assert [t for i, t in enumerate(titles) if t != titles[i - 1]] == [
+        "one",
+        "three",
+    ]
+    assert ("transition", "one>three") in radio.events
+    assert ("started", "two") not in radio.events
+    played = np.concatenate([pcm for pcm, _ in pieces])
+    assert np.isfinite(played).all()

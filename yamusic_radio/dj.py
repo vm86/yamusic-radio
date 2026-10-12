@@ -1927,6 +1927,40 @@ def _fresh(radio: DeckSource, current: Deck, task: Task[Deck]) -> Task[Deck]:
     return create_task(radio.next_deck(current.analysis)) if stale else task
 
 
+@dataclass(slots=True)
+class _Approach:
+    """The deck to blend in and the plan for it, as the blend nears."""
+
+    following: Deck
+    plan: BlendPlan
+    position: int
+
+
+async def _approach(
+    radio: DeckSource, current: Deck, approach: _Approach
+) -> AsyncIterator[Piece]:
+    """Play the track up to its blend, and choose again if the queue changed.
+
+    Until the blend begins the queue may still be changed by hand: the deck
+    that was chosen is then given up for another, and the blend planned anew.
+    """
+    while True:
+        pieces = _pieces(
+            current.pcm[approach.position : approach.plan.start], current.title
+        )
+        for piece in pieces:
+            yield piece
+            approach.position += len(piece[0])
+            if radio.is_stale(approach.following):
+                break
+        else:
+            approach.position = max(approach.position, approach.plan.start)
+            return
+        task = create_task(radio.next_deck(current.analysis))
+        approach.following = await _ready_deck(radio, current, task)
+        approach.plan = _plan(current, approach.following, approach.position)
+
+
 async def mix(radio: DeckSource, effects: float = 0.0) -> AsyncIterator[Piece]:
     """Produce the endless mix: PCM pieces and the title of each."""
     current = await radio.next_deck(None)
@@ -1961,10 +1995,10 @@ async def mix(radio: DeckSource, effects: float = 0.0) -> AsyncIterator[Piece]:
                 radio.skip_taken()
             plan = early or _plan(current, following, position)
 
-            for piece in _pieces(
-                current.pcm[position : plan.start], current.title
-            ):
+            approach = _Approach(following, plan, position)
+            async for piece in _approach(radio, current, approach):
                 yield piece
+            following, plan = approach.following, approach.plan
             async for piece in _transition(
                 radio, current, following, plan, effects
             ):

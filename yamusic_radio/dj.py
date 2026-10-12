@@ -808,9 +808,10 @@ class Radio:
         """Choose the next tracks anew among the ones already loaded.
 
         The track that was already chosen and decoded goes back to the
-        pool, tracks of moods that are not wanted are dropped, and the
-        next track is picked again, so the queue follows the moods
-        selected now. Nothing is downloaded for it.
+        pool, tracks of moods that are not wanted are dropped, the order
+        put in place by hand is forgotten, and the next track is picked
+        again, so the queue follows the moods selected now. Nothing is
+        downloaded for it.
         """
         self._generation += 1
         if (self._allowed_genres, self._allowed_blocked) != (
@@ -825,10 +826,15 @@ class Radio:
                 ", ".join(self._allowed_genres) or "any",
                 ", ".join(self._allowed_blocked) or "none",
             )
-        deck, self._next = self._next, None
+        # What was put in place by hand is the radio's to choose again.
+        self._order = []
+        # The track being blended in stays: it is heard already.
+        deck = None if self._blending else self._next
         if deck is not None:
+            self._next = None
             self._unpick(deck)
         self._drop_unwanted()
+        self._save_playlist()
         log.info("Queue rebuilt from %d loaded tracks", len(self._pool))
         # Wake up the refill: the pool may be short of tracks now.
         self._consumed.set()

@@ -4839,3 +4839,46 @@ async def test_turning_a_backend_off_in_the_api_clears_its_tracks(
         queue = await (await client.get("/api/queue")).json()
         assert sorted(t["title"] for t in queue["next"]) == ["a", "b"]
     assert sorted(c.title for c in radio.pool) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_refreshing_the_queue_forgets_the_order_put_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    radio = await radio_with_tracks(
+        tmp_path, monkeypatch, cache=track_cache, keep=True
+    )
+    radio.queue_order(["d", "c"])
+    now = await radio.next_deck(None)
+    radio.started(now)
+    decoded = await radio.next_deck(now.analysis)
+    assert decoded.title in {"d", "c"}  # what was put first is decoded
+    assert any(t["pinned"] for t in radio.queue()["next"])  # type: ignore[attr-defined]
+
+    radio.refresh_queue()
+
+    queue = cast("dict[str, Any]", radio.queue())
+    assert not any(t["pinned"] for t in queue["next"])
+    assert radio.is_stale(decoded)  # chosen again, by the radio this time
+    assert sorted(next_ids(radio)) == sorted(
+        i for i in "abcd" if i != now.title
+    )
+    # Kept so across a restart.
+    assert track_cache.get_setting("queue_order") == []
+
+
+@pytest.mark.asyncio
+async def test_refreshing_leaves_the_track_being_blended_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+
+    radio.refresh_queue()
+
+    # It is being heard: not given back to the pool, to be played again.
+    assert next_ids(radio)[0] == second.title
+    assert second.title not in [c.title for c in radio.pool]

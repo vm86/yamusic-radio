@@ -13,6 +13,25 @@ export const STREAM_PATHS: Record<StreamFormat, string> = {
   flac: "stream.flac",
 };
 
+/**
+ * Is the browser's audio WebKit's: Safari, and every browser on iOS. It
+ * doesn't play a live stream of bare FLAC, but plays FLAC in Ogg.
+ */
+export function isWebKitAudio(
+  userAgent = navigator.userAgent,
+  touchPoints = navigator.maxTouchPoints,
+): boolean {
+  if (/iP(hone|ad|od)/.test(userAgent)) return true;
+  // iPadOS says it is a Mac, but has a touch screen.
+  if (/Macintosh/.test(userAgent) && touchPoints > 1) return true;
+  return /Safari/.test(userAgent) && !/Chrome|Chromium|Android|Edg|OPR|Firefox/.test(userAgent);
+}
+
+/** The address of the stream of a format in this browser. */
+export function streamPath(format: StreamFormat): string {
+  return format === "flac" && isWebKitAudio() ? "stream.ogg" : STREAM_PATHS[format];
+}
+
 /** A name for a listener: the radio is told it, to say where the page starts. */
 function newToken(): string {
   try {
@@ -56,6 +75,12 @@ export function usePlayer(now: Ref<NowTrack | null>) {
   // Who this connection to the stream is (see the spectrum).
   const token = ref("");
 
+  // Where the player's clock stands when the stream is begun: a stream that
+  // is joined in the middle may not start it at 0.
+  let base = 0;
+  audio.addEventListener("loadedmetadata", () => {
+    base = audio.currentTime;
+  });
   const sync = () => (playing.value = !audio.paused);
   audio.addEventListener("playing", sync);
   audio.addEventListener("pause", sync);
@@ -90,7 +115,8 @@ export function usePlayer(now: Ref<NowTrack | null>) {
 
   async function start(): Promise<void> {
     token.value = newToken();
-    audio.src = `${STREAM_PATHS[format.value]}?l=${token.value}&${Date.now()}`;
+    base = 0;
+    audio.src = `${streamPath(format.value)}?l=${token.value}&${Date.now()}`;
     try {
       await audio.play();
     } catch (error) {
@@ -149,7 +175,7 @@ export function usePlayer(now: Ref<NowTrack | null>) {
     format,
     token,
     /** Seconds of the stream that were played since it was connected. */
-    currentTime: () => audio.currentTime,
+    currentTime: () => audio.currentTime - base,
     toggle,
     label: computed(() => (playing.value ? t("player.stop") : t("player.play"))),
   };

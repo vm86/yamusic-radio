@@ -37,7 +37,7 @@ class FakeAudio extends EventTarget {
   }
 }
 
-import { usePlayer } from "./usePlayer";
+import { isWebKitAudio, usePlayer } from "./usePlayer";
 
 beforeEach(() => vi.stubGlobal("Audio", FakeAudio));
 afterEach(() => vi.unstubAllGlobals());
@@ -67,6 +67,53 @@ describe("who is listening", () => {
 
     FakeAudio.last.currentTime = 4.5;
     expect(player.currentTime()).toBe(4.5);
+  });
+});
+
+describe("the stream in Safari", () => {
+  const safari =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+  const chrome =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+  const iphoneChrome =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0 Mobile/15E148 Safari/604.1";
+  const firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0";
+  const android =
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Mobile Safari/537.36";
+
+  it("is told from the others", () => {
+    expect(isWebKitAudio(safari, 0)).toBe(true);
+    expect(isWebKitAudio(iphoneChrome, 5)).toBe(true); // every browser on iOS
+    expect(isWebKitAudio(safari.replace("Version/18.0 ", ""), 5)).toBe(true); // iPadOS
+    expect(isWebKitAudio(chrome, 0)).toBe(false);
+    expect(isWebKitAudio(firefox, 0)).toBe(false);
+    expect(isWebKitAudio(android, 5)).toBe(false);
+    // A Mac with no touch screen, with nothing of Safari in what it says.
+    expect(isWebKitAudio("Mozilla/5.0 (Macintosh)", 0)).toBe(false);
+  });
+
+  it("gets the FLAC in Ogg, and MP3 as it is", async () => {
+    vi.stubGlobal("navigator", { userAgent: safari, maxTouchPoints: 0 });
+    const player = usePlayer(ref(null));
+    player.format.value = "flac";
+    await player.toggle();
+    expect(FakeAudio.last.getAttribute("src")).toMatch(/^stream\.ogg\?/);
+
+    player.format.value = "mp3";
+    await nextTick();
+    await Promise.resolve();
+    expect(FakeAudio.last.getAttribute("src")).toMatch(/^stream\?/);
+  });
+
+  it("counts the time of the player from where the stream began", async () => {
+    const player = usePlayer(ref(null));
+    await player.toggle();
+
+    FakeAudio.last.currentTime = 12.5; // joined in the middle of a stream
+    FakeAudio.last.dispatchEvent(new Event("loadedmetadata"));
+    FakeAudio.last.currentTime = 14;
+
+    expect(player.currentTime()).toBe(1.5);
   });
 });
 

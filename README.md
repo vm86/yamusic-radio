@@ -2,9 +2,11 @@
 
 Endless DJ radio. Takes tracks from a Yandex Music station and/or from a
 folder of audio files (or from any other source you add as a
-[backend](#adding-a-music-backend)), several at once, beat-matches them (bass swap, three-band EQ blend, filter
-sweeps, optional effects) and streams one continuous mix over HTTP: MP3 at
-320 kbit/s with ICY titles, and a lossless FLAC stream.
+[backend](#adding-a-music-backend)), several at once, beat-matches them (bass
+swap, three-band EQ blend, filter sweeps, optional effects) and streams one
+continuous mix over HTTP: MP3 at 320 kbit/s with ICY titles, and a lossless
+stream (FLAC, or FLAC in Ogg for Safari). There is no web page: the radio has
+the streams and a [REST API](#rest-api).
 
 ## Run
 
@@ -24,17 +26,18 @@ or the API, `PUT /api/auth/backend`) or when it was on in the last run. On
 the very first run, when nothing is remembered yet, a backend that is already
 signed in (has a saved token) is on too. After that a backend that was turned
 off through the API stays off, signed in or not; what the command line turned on
-is remembered. Until one is on the radio waits and `GET /api/auth` offers them. When
-a backend is turned off, or cannot be reached, its tracks that are only linked
-(a folder's) leave the queue, and so does its decoded next track. Two come with the program: `yandex` and `local` (a folder of audio files). A backend
-that fails is left alone for a while (30 s, doubling up to 10 min) and the
-others carry on. `--station ID=STATION` (repeatable) picks the station of a
+is remembered. Until one is on the radio waits, and `GET /api/auth` lists the
+backends. Two come with the program: `yandex` and `local` (a folder of audio
+files). When a backend is turned off, or cannot be reached, its tracks that are
+only linked (a folder's) leave the queue, and so does its decoded next track. A
+backend that fails is left alone for a while (30 s, doubling up to 10 min) and
+the others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
 
 **Local folder.** `--local-dir ~/Music` turns the `local` backend on with that
 folder; the API can choose and change the folder too (it is a field of the
-backend's sign-in, `POST /api/auth`), and the choice is kept in the cache settings, so a restart
-plays from it again (without `--no-cache`). It plays the audio files under the
+backend's sign-in, `POST /api/auth`), and the choice is kept in the cache
+settings, so a restart plays from it again (without `--no-cache`). It plays the audio files under the
 folder (`mp3`, `flac`, `m4a`, `aac`, `ogg`, `opus`, `wav`, `aiff`, `wma`;
 hidden files and folders are skipped) in random order, a few at a time, and
 plays a track again only when all the others were heard. Files are linked, not
@@ -96,9 +99,9 @@ on with the first listener; `POST /api/pause` holds it for everyone until
 `POST /api/resume`.
 
 The stream has no authentication: bind only to trusted networks (`--host`).
-`/stream` is sent with `Access-Control-Allow-Origin: *`, so a client of another
-origin can play it in an `<audio crossorigin>` and analyze the sound with Web
-Audio.
+The streams are sent with `Access-Control-Allow-Origin: *`, so a client of
+another origin can play them in an `<audio crossorigin>` and analyze the sound
+with Web Audio.
 
 ## Key detection
 
@@ -172,21 +175,22 @@ only, and `GET /` answers 404 with `{"web": false, "stream": "/stream",
 "api": "/api/queue"}`. A page, an app or a script does the rest through the
 API: the backends and their sign-in (`/api/auth`), the queue and the next
 track button (`/api/queue`, `/api/next`, `/api/pause`), the moods, the genres
-and the language, the statistics and the spectrum. A client of another origin
-may play the streams and read the API: the streams and `/api/spectrum` are
-sent with `Access-Control-Allow-Origin: *`.
+and the language, the statistics and the spectrum. A page of another origin
+can play the streams and read `/api/spectrum` (both are sent with
+`Access-Control-Allow-Origin: *`); the rest of the API is for the same origin
+or a script.
 
 ## Spectrum
 
 The radio mixes the sound itself, so it knows how loud each band is at every
-moment; a page cannot get that from the stream it plays (it needs CORS and
+moment; a client cannot get that from the stream it plays (it needs CORS and
 it hears the sound ~3 s late). So the radio sends the bands over
-`GET /api/spectrum`, each with its position in the mix, and the page shows
+`GET /api/spectrum`, each with its position in the mix, and a client shows
 them when its player gets there.
 
-To tie the two together, the page gives its connection a name: it opens the
-stream as `/stream?l=NAME` (or `/stream.flac?l=NAME`, `/stream.ogg?l=NAME`) and the spectrum as
-`/api/spectrum?l=NAME`. The radio notes where in the mix that stream starts
+To tie the two together, the client gives its connection a name: it opens the
+stream as `/stream?l=NAME` (or `/stream.flac?l=NAME`, `/stream.ogg?l=NAME`)
+and the spectrum as `/api/spectrum?l=NAME`. The radio notes where in the mix that stream starts
 (a new listener gets the latest 3 s at once) and sends it first as the `start`
 event. A page of another origin can do the same: both URLs are sent with
 `Access-Control-Allow-Origin: *`. The analysis is in `yamusic_radio/spectrum.py`
@@ -226,8 +230,8 @@ Served next to the stream, no authentication.
 | `DELETE /api/moods` | Any mood again. |
 
 Each track has `track_id`, `title`, `artists`, `bpm`, `camelot` (Camelot Wheel code such as `8A`, `""` when the key is unknown), `key` (`A minor`), `loudness_db`,
-`duration_seconds`, `mood`, `cover` (the URL of the cover on Yandex's server
-with `%%` where the size goes, e.g. `.../%%` -> `.../200x200`; `""` when there
+`duration_seconds`, `mood`, `cover` (the URL of the cover, for a Yandex track
+on Yandex's server, with `%%` where the size goes, e.g. `.../%%` -> `.../200x200`; `""` when there
 is none) and `decided`. The first of `next` is already
 decoded (`decided: true`); the rest is a forecast from the pool made the way
 the radio chooses, and the radio may change it, as it picks ~40 s before each
@@ -308,6 +312,10 @@ server or a radio is another to write.
 ```
 
 ## RPM and Docker
+
+A tag `vX.Y.Z` pushed to GitHub builds the RPM (the version of the package is
+the tag without the `v`) and publishes it as a release; commits and pull
+requests only build it (`.github/workflows/rpm.yml`).
 
 `yamusic-radio.spec` builds an RPM that holds one executable,
 `/usr/bin/yamusic-dj` (frozen with PyInstaller: Python and all libraries are

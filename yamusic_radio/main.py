@@ -58,9 +58,9 @@ def init_logging(*, debug: bool, systemd_run: bool) -> None:
 def parse_args() -> Namespace:
     parser = ArgumentParser(
         description=(
-            "DJ radio: download tracks from a Yandex Music station, "
+            "DJ radio: take tracks from Yandex Music and/or a local folder, "
             "beat-match them into one endless mix and stream it as MP3 "
-            "over HTTP (needs ffmpeg)"
+            "and FLAC over HTTP (needs ffmpeg)"
         )
     )
 
@@ -98,7 +98,7 @@ def parse_args() -> Namespace:
         help=(
             "Turn a music backend on (repeat for several). The tracks of "
             "all that are on are mixed. The ones of the last run and the "
-            "ones that are signed in are on too; the page turns them on "
+            "ones that are signed in are on too; the API turns them on "
             "and off"
         ),
     )
@@ -108,7 +108,7 @@ def parse_args() -> Namespace:
         default=None,
         help=(
             "Folder with audio files for the local backend; it is turned on "
-            "and the folder kept in the settings (the page can change it)"
+            "and the folder kept in the settings (the API can change it)"
         ),
     )
     parser.add_argument(

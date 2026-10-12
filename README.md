@@ -20,9 +20,13 @@ python -m venv .venv && .venv/bin/pip install -e ".[test,lint]"
 **Music backends.** The tracks come from the backends that are on; with
 several on, their tracks go into one pool and the radio picks the best fit
 among them. A backend is on when it is asked for (`--backend ID`, repeatable,
-or the page, or `PUT /api/auth/backend`), when it was on in the last run, or
-when it is already signed in (has a saved token). Until one is on the radio
-waits and the page offers them. Two come with the program: `yandex` and `local` (a folder of audio files). A backend
+or the page, or `PUT /api/auth/backend`) or when it was on in the last run. On
+the very first run, when nothing is remembered yet, a backend that is already
+signed in (has a saved token) is on too. After that a backend that was turned
+off on the page stays off, signed in or not; what the command line turned on
+is remembered. Until one is on the radio waits and the page offers them. When
+a backend is turned off, or cannot be reached, its tracks that are only linked
+(a folder's) leave the queue, and so does its decoded next track. Two come with the program: `yandex` and `local` (a folder of audio files). A backend
 that fails is left alone for a while (30 s, doubling up to 10 min) and the
 others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
@@ -165,7 +169,7 @@ stay on neighbouring keys (a fifth of them would by chance).
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
 play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the lossless stream (remembered; Safari and iOS get it as FLAC in Ogg), the language of the music (Yandex backend) and volume, the current track with its progress and, under the cover, the spectrum of the mix (12 bars, in time with the sound), the previous and
-the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
+the next tracks (a menu on each of the coming ones moves it, takes it out of the queue or plays it next), mood chips, the genres (tabs *Play* and *Never play*), the
 transition statistics, and the backends: which are on, the sign-in of each
 (the code of a device flow, or the fields it asks for). The theme is light,
 dark or the system's, set by the button in the top bar (each press: system,
@@ -208,7 +212,11 @@ Served next to the stream, no authentication.
 | Request | Answer |
 |---|---|
 | `GET /api/queue?previous=2&next=15` | `previous` (oldest first), `now` (with `elapsed_seconds`, which does not run while the mix is paused), `next`, `moods`, the state of the next track button (`skip_pending`, `blending`, `can_skip`, as in `GET /api/next`) and the pause (`paused`, `pause_reason`, as in `POST /api/pause`). Both counts are capped at 15; the defaults are 2 and 15. |
-| `POST /api/queue/refresh` | Choose the next tracks anew among the ones already loaded: the track already chosen and decoded goes back to the pool, tracks of moods and genres that are not selected are dropped (the genres picked since come into force here). Tracks of other genres are not downloaded; one without a genre is not played while genres are selected. Answers like `GET /api/queue`. |
+| `PUT /api/queue/order` `{"track_ids": ["a", "b"]}` | Put the tracks of the queue (the `next` ones, by `track_id`) in this order by hand. The tracks left out follow them, as the radio chooses. Answers like `GET /api/queue`; 404 for a track that is not in the queue, 409 while a transition is under way (the next track is fixed). The same goes for the three that follow. |
+| `POST /api/queue/move` `{"track_id": "a", "position": 0}` | Move a track of the queue to a place in it (0 is the next one). Answers like `GET /api/queue`. |
+| `DELETE /api/queue/tracks/{track_id}` | Take a track out of the queue: it is not played, nor loaded again (after a restart either). Answers like `GET /api/queue`. |
+| `POST /api/queue/play` `{"track_id": "a"}` | Play a track of the queue next, as `POST /api/next` does: the blend starts on a good beat. Answers 202 with the queue. |
+| `POST /api/queue/refresh` | Choose the next tracks anew among the ones already loaded: the track already chosen and decoded goes back to the pool, tracks of moods and genres that are not selected are dropped (the genres picked since come into force here). Tracks of other genres are not downloaded; one without a genre is not played while genres are selected. The order put by hand is forgotten. Answers like `GET /api/queue`. |
 | `GET /api/genres` | `available` (the genres of the tracks heard so far, the most common first), `selected` (picked) and `applied` (the queue is built from these). Empty is any genre. |
 | `PUT /api/genres` `{"genres": ["house"]}` | Pick genres. Nothing is rebuilt: they come into force with the next `POST /api/queue/refresh`. `DELETE /api/genres` picks any. |
 | `PUT /api/genres/blocked` `{"genres": ["rap"]}` | Genres never to play (they win over the picked ones); `blocked` and `blocked_applied` in `GET /api/genres`. Kept in the cache, in force with the next refresh like the picked ones. `DELETE /api/genres/blocked` clears them. |

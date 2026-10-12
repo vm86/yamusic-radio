@@ -1747,7 +1747,7 @@ async def test_a_failed_mix_starts_again(
     calls = []
     pauses = []
 
-    async def loop(*_: object) -> None:
+    async def loop(*_: object, **__: object) -> None:
         calls.append(1)
         if len(calls) < 3:
             raise ValueError("boom")
@@ -3596,7 +3596,7 @@ async def test_the_radio_stays_up_and_retries_while_no_backend_gives_tracks(
     async def pause(seconds: float) -> None:
         pauses.append(seconds)
 
-    async def play(*_: object) -> None:
+    async def play(*_: object, **__: object) -> None:
         return None
 
     monkeypatch.setattr(dj.Radio, "fill", fill)
@@ -4172,3 +4172,193 @@ async def test_nothing_is_kept_unless_it_is_asked_for(
     assert track_cache.get_setting("playlist") is None
     assert radio.restore_playlist() == 0
     assert len(radio.pool) == 2
+
+
+def ogg_page(
+    payload: bytes,
+    granule: int,
+    *,
+    kind: int = 0,
+    sequence: int = 0,
+) -> bytes:
+    """Build an Ogg page of one packet no longer than 255 bytes."""
+    head = (
+        b"OggS"
+        + bytes([0, kind])
+        + granule.to_bytes(8, "little", signed=True)
+        + (7).to_bytes(4, "little")
+        + sequence.to_bytes(4, "little")
+        + bytes(4)
+        + bytes([1, len(payload)])
+    )
+    page = head + payload
+    crc = dj._ogg_crc(page)  # noqa: SLF001
+    return page[:22] + crc.to_bytes(4, "little") + page[26:]
+
+
+def test_ogg_pages_are_told_by_their_crc() -> None:
+    page = ogg_page(b"audio", 4096, sequence=2)
+
+    assert dj.ogg_page_length(page) == len(page)
+    assert dj.ogg_page_length(b"xx" + page, 2) == len(page)
+    assert dj.ogg_page_length(page[:20]) is None  # cut in the header
+    assert dj.ogg_page_length(page[:-1]) is None  # cut in the data
+    assert dj.ogg_page_length(page[:2]) is None  # "Og": might be one
+    assert dj.ogg_page_length(b"OggX" + page[4:]) == 0
+    assert dj.ogg_page_length(page[:-1] + b"?") == 0  # the CRC is wrong
+    assert dj.ogg_page_length(b"\x00" + page[1:]) == 0
+    version = page[:4] + b"\x01" + page[5:]
+    assert dj.ogg_page_length(version) == 0
+
+
+def test_a_listener_starts_on_a_page_of_audio_that_stands_alone() -> None:
+    beginning = ogg_page(b"head", 0, kind=2)
+    comment = ogg_page(b"comment", 0, sequence=1)
+    continued = ogg_page(b"rest", 2048, kind=1, sequence=2)
+    audio = ogg_page(b"frames", 4096, sequence=3)
+    later = ogg_page(b"more", 8192, sequence=4)
+    cut = audio[10:]  # a window that begins in the middle of a page
+
+    assert dj.ogg_start(cut + later) == len(cut)
+    assert dj.ogg_start(beginning + comment + continued + audio) == (
+        len(beginning + comment + continued)
+    )  # not the header pages, not a page that goes on from the one before
+    # The marker among the data of a page is not a page.
+    stray = b"zzOggSzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    assert dj.ogg_start(stray + later) == len(stray)
+    assert dj.ogg_start(b"OggSnothing here") == len(b"OggSnothing here")
+    assert dj.ogg_start(audio[:-1]) == len(audio) - 1  # not whole: not a start
+    assert dj.ogg_start(b"") == 0
+
+
+def test_the_header_pages_end_where_the_audio_begins() -> None:
+    beginning = ogg_page(b"head", 0, kind=2)
+    comment = ogg_page(b"comment", 0, sequence=1)
+    audio = ogg_page(b"frames", 4096, sequence=2)
+
+    assert dj.ogg_header_length(beginning + comment + audio) == len(
+        beginning + comment
+    )
+    assert dj.ogg_header_length(beginning) is None  # no word of the end yet
+    assert dj.ogg_header_length(beginning + comment) is None
+    assert dj.ogg_header_length((beginning + comment + audio)[:-1]) is None
+    assert dj.ogg_header_length(beginning[:10]) is None
+    with pytest.raises(ValueError, match="not an Ogg"):
+        dj.ogg_header_length(b"fLaC....")
+
+
+def ogg_bytes(seconds: float = 3.0) -> bytes:
+    """Encode a tone as ffmpeg does it for the Ogg stream."""
+    t = np.arange(int(SR * seconds)) / SR
+    tone = (
+        0.3 * np.sin(2 * np.pi * 440 * t)[:, None] * np.ones((1, 2))
+    ).astype(np.float32)
+    done = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "f32le",
+            "-ac",
+            "2",
+            "-ar",
+            str(SR),
+            "-i",
+            "pipe:0",
+            *dj.OGG_ARGS,
+            "pipe:1",
+        ],
+        input=tone.tobytes(),
+        capture_output=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def ogg_hub() -> dj.Broadcaster:
+    return dj.Broadcaster(
+        bytes_per_second=dj.FLAC_BYTES_PER_SECOND,
+        frame_start=dj.ogg_start,
+        header_length=dj.ogg_header_length,
+        lag_seconds=dj.OGG_LAG_SECONDS,
+    )
+
+
+@needs_ffmpeg
+def test_a_listener_of_the_ogg_stream_decodes_what_it_is_given() -> None:
+    stream = ogg_bytes()
+    length = dj.ogg_header_length(stream)
+    assert length is not None
+    assert stream[:4] == b"OggS"
+    hub = ogg_hub()
+    hub.header = stream[:length]
+    for start in range(length, len(stream), 4096):
+        hub.publish(stream[start : start + 4096])
+
+    queue, position = hub.subscribe_at()
+    header, audio = queue.get_nowait(), queue.get_nowait()
+
+    assert header == stream[:length]
+    assert dj.ogg_start(audio) == 0  # on a page
+    assert position is not None
+    # What the player is given is a whole Ogg FLAC stream to ffmpeg.
+    decoded = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "ogg",
+            "-i",
+            "pipe:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        input=header + audio,
+        capture_output=True,
+        check=True,
+    )
+    assert decoded.stderr == b""
+
+
+@needs_ffmpeg
+@pytest.mark.asyncio
+async def test_the_ogg_stream_is_served_and_the_mix_is_encoded_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def chunks(*_: object) -> AsyncIterator[tuple[np.ndarray, str]]:
+        for i in range(10_000):
+            tone = 0.2 * np.sin(np.arange(SR // 4) * 0.05 + i)
+            yield np.stack([tone, tone], axis=1).astype(np.float32), f"t{i}"
+
+    monkeypatch.setattr(dj, "mix", chunks)
+    radio = make_radio(tmp_path, monkeypatch, FakeBackend([]), {})
+    hub, ogg = dj.Broadcaster(), ogg_hub()
+    task = asyncio.create_task(
+        dj._encode_loop(radio, hub, 0.0, ogg=ogg)  # noqa: SLF001
+    )
+    try:
+        listener = ogg.subscribe()  # only an Ogg listener: the mix goes on
+        await asyncio.wait_for(listener.get(), 5)
+        await asyncio.wait_for(listener.get(), 5)
+        assert ogg.header.startswith(b"OggS")
+        assert not radio.paused
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    app = dj.make_app(dj.Broadcaster(), ogg=ogg)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/stream.ogg")
+        assert response.content_type == "audio/ogg"
+        assert response.headers["Access-Control-Allow-Origin"] == "*"
+        body = await asyncio.wait_for(response.content.readexactly(2000), 2)
+        assert body.startswith(b"OggS")
+        response.close()
+    async with TestClient(TestServer(dj.make_app(dj.Broadcaster()))) as client:
+        assert (await client.get("/stream.ogg")).status == 404

@@ -178,6 +178,7 @@ MIN_RATE_SPAN_SECONDS = 1.0
 # for 93 ms, so the lag of it is 0-93 ms.
 MP3_LAG_SECONDS = 0.136
 FLAC_LAG_SECONDS = 0.077
+OGG_LAG_SECONDS = 0.076
 # How long the spectrum waits for the stream of a page to connect, how far
 # before the start of it the frames begin, and how often a quiet connection
 # is asked if it is there.
@@ -1948,6 +1949,104 @@ def flac_start(data: bytes) -> int:
     return len(data)
 
 
+OGG_MARKER = b"OggS"
+OGG_PAGE_HEADER_SIZE = 27
+OGG_CONTINUED = 0x01
+OGG_BEGINNING = 0x02
+OGG_CRC_POLYNOMIAL = 0x04C11DB7
+
+
+def _ogg_crc_table() -> tuple[int, ...]:
+    table = []
+    for byte in range(256):
+        crc = byte << 24
+        for _ in range(8):
+            crc = (
+                ((crc << 1) ^ OGG_CRC_POLYNOMIAL) & 0xFFFFFFFF
+                if crc & 0x80000000
+                else (crc << 1) & 0xFFFFFFFF
+            )
+        table.append(crc)
+    return tuple(table)
+
+
+_OGG_CRC_TABLE = _ogg_crc_table()
+
+
+def _ogg_crc(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ _OGG_CRC_TABLE[(crc >> 24) ^ byte]
+    return crc
+
+
+def ogg_page_length(data: bytes, place: int = 0) -> int | None:
+    """Return the length of the Ogg page at place; 0 if there is none.
+
+    None if data ends before the page does. A page counts when its CRC is
+    right (the marker may happen inside the audio).
+    """
+    if data[place : place + 4] != OGG_MARKER[: len(data) - place]:
+        return 0
+    if len(data) < place + OGG_PAGE_HEADER_SIZE:
+        return None
+    if data[place + 4] != 0:  # the version
+        return 0
+    segments = data[place + 26]
+    if len(data) < place + OGG_PAGE_HEADER_SIZE + segments:
+        return None
+    table = data[place + OGG_PAGE_HEADER_SIZE : place + 27 + segments]
+    size = OGG_PAGE_HEADER_SIZE + segments + sum(table)
+    if len(data) < place + size:
+        return None
+    page = bytearray(data[place : place + size])
+    stored = int.from_bytes(page[22:26], "little")
+    page[22:26] = bytes(4)
+    return size if _ogg_crc(bytes(page)) == stored else 0
+
+
+def _ogg_granule(data: bytes, place: int) -> int:
+    return int.from_bytes(data[place + 6 : place + 14], "little", signed=True)
+
+
+def ogg_header_length(data: bytes) -> int | None:
+    """Return how long the header pages of an Ogg stream are.
+
+    These are the pages before the first one of audio, which says where it
+    is in the stream (its granule position) when the header's say nothing.
+    None if data doesn't hold them and that page yet.
+    """
+    place = 0
+    while True:
+        size = ogg_page_length(data, place)
+        if size is None:
+            return None
+        if size == 0:
+            raise ValueError("not an Ogg stream")
+        if place and _ogg_granule(data, place) != 0:
+            return place
+        place += size
+
+
+def ogg_start(data: bytes) -> int:
+    """Return where the first whole page of audio in data starts.
+
+    A listener can start on a page that doesn't go on from the one before
+    it. Returns len(data) if there is none.
+    """
+    place = data.find(OGG_MARKER)
+    while place != -1:
+        size = ogg_page_length(data, place)
+        if (
+            size
+            and not data[place + 5] & (OGG_CONTINUED | OGG_BEGINNING)
+            and _ogg_granule(data, place) > 0
+        ):
+            return place
+        place = data.find(OGG_MARKER, place + 1)
+    return len(data)
+
+
 class Broadcaster:
     """Fans the encoded stream out to the connected listeners."""
 
@@ -2497,6 +2596,8 @@ def make_app(
     backends: MultiBackend | None = None,
     lossless: Broadcaster | None = None,
     spectrum: SpectrumFeed | None = None,
+    *,
+    ogg: Broadcaster | None = None,
 ) -> web.Application:
     app = web.Application()
     starts = StartPositions()
@@ -2510,6 +2611,13 @@ def make_app(
             _stream_handler(
                 lossless, "audio/flac", titles=False, starts=starts
             ),
+        )
+    if ogg is not None:
+        # The same FLAC in an Ogg container: Safari plays a live stream of
+        # that, and doesn't play one of bare FLAC.
+        app.router.add_get(
+            "/stream.ogg",
+            _stream_handler(ogg, "audio/ogg", titles=False, starts=starts),
         )
     if spectrum is not None:
         _add_spectrum_api(app, spectrum, starts)
@@ -2530,6 +2638,21 @@ FLAC_ARGS = (
     "flac",
     "-f",
     "flac",
+)
+
+
+# The same FLAC in Ogg pages, which are made as often as the muxer allows.
+OGG_ARGS = (
+    "-af",
+    "aresample=dither_method=triangular",
+    "-sample_fmt",
+    "s16",
+    "-c:a",
+    "flac",
+    "-page_duration",
+    "100000",
+    "-f",
+    "ogg",
 )
 
 
@@ -2579,15 +2702,22 @@ async def _forward(stdout: asyncio.StreamReader, hub: Broadcaster) -> None:
 
 
 async def _start_encoders(
-    hub: Broadcaster, lossless: Broadcaster | None
+    hub: Broadcaster,
+    lossless: Broadcaster | None,
+    ogg: Broadcaster | None = None,
 ) -> list[tuple[asyncio.subprocess.Process, Broadcaster]]:
-    encoders = [(await _start_encoder(MP3_ARGS), hub)]
+    wanted: list[tuple[tuple[str, ...], Broadcaster]] = [(MP3_ARGS, hub)]
     if lossless is not None:
-        try:
-            encoders.append((await _start_encoder(FLAC_ARGS), lossless))
-        except BaseException:
-            await _stop_encoders(encoders)
-            raise
+        wanted.append((FLAC_ARGS, lossless))
+    if ogg is not None:
+        wanted.append((OGG_ARGS, ogg))
+    encoders: list[tuple[asyncio.subprocess.Process, Broadcaster]] = []
+    try:
+        for args, stream in wanted:
+            encoders.append((await _start_encoder(args), stream))
+    except BaseException:
+        await _stop_encoders(encoders)
+        raise
     return encoders
 
 
@@ -2636,16 +2766,18 @@ async def _encode_loop(
     effects: float,
     lossless: Broadcaster | None = None,
     spectrum: SpectrumFeed | None = None,
+    *,
+    ogg: Broadcaster | None = None,
 ) -> None:
     """Mix, encode and publish in real time while somebody listens."""
-    hubs = [hub] if lossless is None else [hub, lossless]
+    hubs = [h for h in (hub, lossless, ogg) if h is not None]
     analyzer = SpectrumAnalyzer()
     # The positions in the mix start over with it.
     for stream in hubs:
         stream.reset_position()
     if spectrum is not None:
         spectrum.reset()
-    encoders = await _start_encoders(hub, lossless)
+    encoders = await _start_encoders(hub, lossless, ogg)
     forwarders = [
         create_task(_forward(proc.stdout, target), name="dj-forward")
         for proc, target in encoders
@@ -2683,11 +2815,13 @@ async def encode_forever(
     effects: float,
     lossless: Broadcaster | None = None,
     spectrum: SpectrumFeed | None = None,
+    *,
+    ogg: Broadcaster | None = None,
 ) -> None:
     """Keep the mix going: a failure ends only the mix it happened in."""
     while True:
         try:
-            await _encode_loop(radio, hub, effects, lossless, spectrum)
+            await _encode_loop(radio, hub, effects, lossless, spectrum, ogg=ogg)
         except CancelledError:
             raise
         except Exception:
@@ -2765,6 +2899,12 @@ async def serve(
             header_length=flac_header_length,
             lag_seconds=FLAC_LAG_SECONDS,
         )
+        ogg = Broadcaster(
+            bytes_per_second=FLAC_BYTES_PER_SECOND,
+            frame_start=ogg_start,
+            header_length=ogg_header_length,
+            lag_seconds=OGG_LAG_SECONDS,
+        )
         spectrum = SpectrumFeed()
         runner = web.AppRunner(
             make_app(
@@ -2773,13 +2913,15 @@ async def serve(
                 backend if isinstance(backend, MultiBackend) else None,
                 lossless,
                 spectrum,
+                ogg=ogg,
             ),
             access_log=None,
         )
         await runner.setup()
         await web.TCPSite(runner, host, port).start()
         log.info(
-            "Streaming at http://%s:%d/stream (MP3 %s) and /stream.flac",
+            "Streaming at http://%s:%d/stream (MP3 %s), /stream.flac, "
+            "/stream.ogg",
             host,
             port,
             MP3_BITRATE,
@@ -2807,7 +2949,12 @@ async def serve(
             refill = create_task(radio.keep_filled(), name="dj-refill")
             try:
                 await encode_forever(
-                    radio, hub, EFFECT_LEVELS[effects], lossless, spectrum
+                    radio,
+                    hub,
+                    EFFECT_LEVELS[effects],
+                    lossless,
+                    spectrum,
+                    ogg=ogg,
                 )
             finally:
                 refill.cancel()

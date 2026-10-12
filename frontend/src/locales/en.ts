@@ -96,6 +96,10 @@ export const en: Messages = {
   "auth.link": "Open the sign-in page",
   "auth.fill": "Enter your details to sign in. The radio starts by itself.",
   "auth.submit": "Sign in",
+  "auth.setup": "Say where the music is. The radio starts by itself.",
+  "auth.set": "Choose",
+  "auth.change": "Change",
+  "field.directory": "Folder with the music",
   "auth.resting": "not answering, the others play meanwhile",
 
   "toast.backendFailed": "Could not choose the music service: {reason}",

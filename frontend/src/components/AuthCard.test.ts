@@ -12,6 +12,8 @@ const backend = (id: string, over: Partial<BackendInfo> = {}): BackendInfo => ({
   url: null,
   code: null,
   fields: [],
+  settings: {},
+  setting_fields: [],
   ...over,
 });
 const authOf = (backends: BackendInfo[], authorized = false): AuthInfo => ({
@@ -20,6 +22,50 @@ const authOf = (backends: BackendInfo[], authorized = false): AuthInfo => ({
   url: null,
   code: null,
   fields: [],
+});
+
+describe("AuthCard and a folder of music", () => {
+  const folder = [{ name: "directory", label: "Folder with the music", secret: false }];
+
+  it("asks for the folder of a source that is on and has none", async () => {
+    const waiting = backend("local", { enabled: true, fields: folder, setting_fields: folder });
+    const wrapper = mount(AuthCard, { props: { auth: authOf([backend("yandex"), waiting]) } });
+
+    expect(wrapper.text()).toContain("Укажите, где лежит музыка");
+    expect(wrapper.find("label span").text()).toBe("Папка с музыкой");
+    await wrapper.find("input").setValue("/music");
+    await wrapper.find("form").trigger("submit");
+
+    expect(wrapper.emitted("signIn")).toEqual([["local", { directory: "/music" }]]);
+    expect(wrapper.find("button[type=submit]").text()).toBe("Выбрать");
+  });
+
+  it("lets the folder be changed once it is chosen, with the one it has in the field", async () => {
+    const chosen = backend("local", {
+      enabled: true,
+      authorized: true,
+      available: true,
+      settings: { directory: "/music" },
+      setting_fields: folder,
+    });
+    const wrapper = mount(AuthCard, { props: { auth: authOf([backend("yandex"), chosen], true) } });
+
+    const input = wrapper.find<HTMLInputElement>("input");
+    expect(input.element.value).toBe("/music");
+    await input.setValue("/other");
+    await wrapper.find("form").trigger("submit");
+
+    expect(wrapper.emitted("signIn")).toEqual([["local", { directory: "/other" }]]);
+    expect(wrapper.find("button[type=submit]").text()).toBe("Сменить");
+  });
+
+  it("has no such form for a source that is off or has no settings", () => {
+    const off = backend("local", { settings: { directory: "/music" }, setting_fields: folder });
+    const plain = backend("yandex", { enabled: true, authorized: true, available: true });
+    const wrapper = mount(AuthCard, { props: { auth: authOf([plain, off], true) } });
+
+    expect(wrapper.find("form").exists()).toBe(false);
+  });
 });
 
 describe("AuthCard", () => {

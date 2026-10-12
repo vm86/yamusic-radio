@@ -79,6 +79,9 @@ export interface BackendInfo {
   code: string | null;
   /** What to type to sign in, for a backend that asks for it. */
   fields: AuthField[];
+  /** The settings it has (the folder of the local one) and what they are called. */
+  settings: Record<string, string>;
+  setting_fields: AuthField[];
 }
 
 export interface AuthInfo {

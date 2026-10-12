@@ -59,6 +59,11 @@ export function t(key: MessageKey, params: Record<string, string | number> = {})
   return messages.value[key].replace(/\{(\w+)\}/g, (_, name: string) => String(params[name] ?? ""));
 }
 
+/** A message if there is one (the radio names some things itself), else the fallback. */
+export function tryT(key: string, fallback: string): string {
+  return key in messages.value ? t(key as MessageKey) : fallback;
+}
+
 /** The messages under a prefix by the rest of their keys: the names of the moods... */
 function names(prefix: string): () => Record<string, string> {
   return () =>

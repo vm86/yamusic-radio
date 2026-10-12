@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive } from "vue";
-import type { AuthInfo, BackendInfo } from "../api";
-import { t } from "../i18n";
+import type { AuthField, AuthInfo, BackendInfo } from "../api";
+import { t, tryT } from "../i18n";
 
 const props = defineProps<{ auth: AuthInfo }>();
 const emit = defineEmits<{
@@ -14,6 +14,17 @@ const backends = computed(() => props.auth.backends ?? []);
 const waiting = computed(() => backends.value.filter((b) => b.enabled && !b.authorized));
 const resting = computed(() => backends.value.filter((b) => b.authorized && !b.available));
 const values = reactive<Record<string, Record<string, string>>>({});
+// A source that is signed in and has settings (the folder) lets them be changed.
+const settingFields = (backend: BackendInfo): AuthField[] => backend.setting_fields ?? [];
+const configurable = computed(() => backends.value.filter((b) => b.enabled && b.authorized && settingFields(b).length));
+const edits = reactive<Record<string, Record<string, string>>>({});
+
+function edited(backend: BackendInfo): Record<string, string> {
+  return (edits[backend.id] ??= { ...(backend.settings ?? {}) });
+}
+function fieldLabel(field: AuthField): string {
+  return tryT(`field.${field.name}`, field.label);
+}
 
 function ready(backend: BackendInfo): boolean {
   return Boolean(backend.url && backend.code);
@@ -44,7 +55,8 @@ function typed(backend: BackendInfo): Record<string, string> {
 
     <div v-for="backend in waiting" :key="backend.id" class="sign-in">
       <h3>{{ backend.name }}</h3>
-      <p v-if="backend.fields.length">{{ t("auth.fill") }}</p>
+      <p v-if="settingFields(backend).length">{{ t("auth.setup") }}</p>
+      <p v-else-if="backend.fields.length">{{ t("auth.fill") }}</p>
       <p v-else>{{ ready(backend) ? t("auth.open") : t("auth.waiting") }}</p>
       <div v-if="ready(backend)" class="code">{{ backend.code }}</div>
       <a v-if="ready(backend)" class="btn" :href="backend.url ?? undefined" target="_blank" rel="noopener">
@@ -52,7 +64,7 @@ function typed(backend: BackendInfo): Record<string, string> {
       </a>
       <form v-if="backend.fields.length" @submit.prevent="emit('signIn', backend.id, { ...typed(backend) })">
         <label v-for="field in backend.fields" :key="field.name">
-          <span>{{ field.label }}</span>
+          <span>{{ fieldLabel(field) }}</span>
           <input
             v-model="typed(backend)[field.name]"
             :type="field.secret ? 'password' : 'text'"
@@ -60,7 +72,18 @@ function typed(backend: BackendInfo): Record<string, string> {
             required
           />
         </label>
-        <button class="btn" type="submit">{{ t("auth.submit") }}</button>
+        <button class="btn" type="submit">{{ settingFields(backend).length ? t("auth.set") : t("auth.submit") }}</button>
+      </form>
+    </div>
+
+    <div v-for="backend in configurable" :key="backend.id" class="sign-in">
+      <h3>{{ backend.name }}</h3>
+      <form @submit.prevent="emit('signIn', backend.id, { ...edited(backend) })">
+        <label v-for="field in settingFields(backend)" :key="field.name">
+          <span>{{ fieldLabel(field) }}</span>
+          <input v-model="edited(backend)[field.name]" type="text" :name="field.name" required />
+        </label>
+        <button class="btn" type="submit">{{ t("auth.change") }}</button>
       </form>
     </div>
   </section>

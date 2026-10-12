@@ -157,6 +157,23 @@ def parse_args() -> Namespace:
         ),
     )
     parser.add_argument(
+        "--tracks-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Where the tracks that are loaded and wait for their turn are "
+            "kept, so that a restart plays them and doesn't download them "
+            "again (default: next to the cache, as <cache name>-tracks; a "
+            "pool of lossless tracks takes some hundreds of MB)"
+        ),
+    )
+    parser.add_argument(
+        "--no-keep-tracks",
+        action="store_true",
+        default=False,
+        help="Keep no tracks between runs: they are loaded again at a start",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         default=False,
@@ -206,6 +223,15 @@ def _stations(values: list[str], first: str) -> dict[str, str]:
     return stations
 
 
+def _tracks_dir(options: Namespace, cache: TrackCache | None) -> Path | None:
+    """Return where to keep the waiting tracks, None to keep none."""
+    if cache is None or options.no_keep_tracks:
+        return None
+    chosen: Path | None = options.tracks_dir
+    cache_path: Path = options.cache
+    return chosen or cache_path.with_name(f"{cache_path.stem}-tracks")
+
+
 async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     session = ClientSession(
         raise_for_status=False,
@@ -234,6 +260,7 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
             effects=options.effects,
             mood_arc=options.mood_arc,
             cache=cache,
+            tracks_dir=_tracks_dir(options, cache),
             ready=ready,
         )
     )

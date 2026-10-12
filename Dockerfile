@@ -46,4 +46,5 @@ EXPOSE 8000
 
 # The token and the cache live in /data: mount a volume there.
 ENTRYPOINT ["yamusic-dj", "--foreground", "--host", "0.0.0.0", \
-    "--config", "/data/config.json", "--cache", "/data/cache.db"]
+    "--config", "/data/config.json", "--cache", "/data/cache.db", \
+    "--tracks-dir", "/data/tracks"]

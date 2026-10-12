@@ -44,7 +44,7 @@ import numpy as np
 from aiohttp import web
 
 from yamusic_radio import dj_mix
-from yamusic_radio.backend import AuthError, Feedback
+from yamusic_radio.backend import AuthError, Feedback, Track
 from yamusic_radio.dj_mix import (
     CHANNELS,
     SAMPLE_RATE,
@@ -68,7 +68,7 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
-    from yamusic_radio.backend import MusicBackend, Track
+    from yamusic_radio.backend import MusicBackend
     from yamusic_radio.cache import TrackCache
 
 log = logging.getLogger(__name__)
@@ -105,6 +105,28 @@ SETTING_GENRES = "genres"
 SETTING_BLOCKED = "blocked_genres"
 SETTING_STATION = "station_settings"
 SETTING_LANGUAGE = "language"
+# The tracks loaded and waiting for their turn: the files are kept as well.
+# What a download can be called, of the ones that are cleared away.
+AUDIO_SUFFIXES = frozenset(
+    {
+        f".{codec}"
+        for codec in (
+            "mp3",
+            "flac",
+            "flac-mp4",
+            "aac",
+            "aac-mp4",
+            "he-aac",
+            "he-aac-mp4",
+            "m4a",
+            "mp4",
+            "ogg",
+            "opus",
+            "wav",
+        )
+    }
+)
+SETTING_PLAYLIST = "playlist"
 # The languages of the music a station can be set to (Yandex's own names).
 LANGUAGES = ("any", "russian", "not-russian", "without-words")
 # When the language is changed, the tracks loaded for the old one are kept
@@ -283,6 +305,27 @@ class Candidate:
     genre: str = ""
 
 
+def _candidate_json(candidate: Candidate) -> dict[str, object]:
+    """Keep a candidate (its analysis is in the cache) as JSON."""
+    return {
+        "title": candidate.title,
+        "file": candidate.path.name,
+        "mood": candidate.mood,
+        "track": dataclasses.asdict(candidate.track)
+        if candidate.track is not None
+        else None,
+    }
+
+
+def _track_back(data: object) -> Track:
+    if not isinstance(data, dict):
+        raise TypeError("a track is an object")
+    names = {field.name for field in dataclasses.fields(Track)}
+    values = {k: v for k, v in data.items() if k in names}
+    values["artists"] = tuple(values["artists"])
+    return Track(**values)
+
+
 @dataclass(slots=True)
 class Played:
     """What is kept of a track once it has been played, to repeat it."""
@@ -353,11 +396,15 @@ class Radio:
         pool_size: int = DEFAULT_POOL_SIZE,
         mood_arc: bool = False,
         cache: TrackCache | None = None,
+        keep_playlist: bool = False,
     ) -> None:
         log.info("Keys are found by %s", dj_mix.key_detector())
         self._backend = backend
         self._cache = cache
         self._workdir = workdir
+        # The loaded tracks are kept in the cache (the files stay in workdir,
+        # which must be a place that lasts) for the next run to start on.
+        self._keep_playlist = keep_playlist and cache is not None
         self._station = station_id
         self._pool_size = pool_size
         self._pool: list[Candidate] = []
@@ -373,12 +420,7 @@ class Radio:
         self._mood_arc = mood_arc
         # Tracks turned down for their mood, counted by the loading.
         self._off_mood = 0
-        self._mood = ""
-        # The language setting the station has now ("" before the settings
-        # are put aside) and the one picked here, None for the account's own.
-        self._language = ""
-        self._picked_language: str | None = None
-        self._saved_settings: tuple[str, str, str] | None = None
+        self._init_station_settings()
         self._playing_id = ""
         # What the API shows: the track heard now, the ones before it and
         # the one already decoded to come next.
@@ -443,6 +485,15 @@ class Radio:
     def _remember(self, key: str, value: object) -> None:
         if self._cache is not None:
             self._cache.put_setting(key, value)
+
+    def _init_station_settings(self) -> None:
+        """Start with the settings of the station not touched."""
+        self._mood = ""
+        # The language setting the station has now ("" before the settings
+        # are put aside) and the one picked here, None for the account's own.
+        self._language = ""
+        self._picked_language: str | None = None
+        self._saved_settings: tuple[str, str, str] | None = None
 
     def _forget(self, key: str) -> None:
         if self._cache is not None:
@@ -630,8 +681,86 @@ class Radio:
         for candidate in self._pool[LANGUAGE_KEEP_TRACKS:]:
             candidate.path.unlink(missing_ok=True)
         del self._pool[LANGUAGE_KEEP_TRACKS:]
+        self._save_playlist()
         # Wake up the refill: the pool is short of tracks now.
         self._consumed.set()
+
+    def _save_playlist(self) -> None:
+        """Keep what is loaded and waiting, for a restart to take up."""
+        if not self._keep_playlist:
+            return
+        waiting = [self._next.source] if self._next is not None else []
+        entries = [
+            _candidate_json(c)
+            for c in (*waiting, *self._pool)
+            if c is not None and c.track is not None and c.path.exists()
+        ]
+        self._remember(SETTING_PLAYLIST, entries)
+
+    def restore_playlist(self) -> int:
+        """Take back the tracks of the last run that were loaded and waiting.
+
+        Their files are in the working directory and their analyses in the
+        cache, so nothing is downloaded or analyzed again. Files that are
+        not of them (a download that was cut short, the track that was
+        playing) are removed. Returns how many tracks came back.
+        """
+        if not self._keep_playlist or self._cache is None:
+            return 0
+        saved = self._cache.get_setting(SETTING_PLAYLIST)
+        kept: set[Path] = set()
+        for entry in saved if isinstance(saved, list) else []:
+            candidate = self._candidate_back(entry)
+            if candidate is None:
+                continue
+            kept.add(candidate.path)
+            if self._wanted(candidate):
+                self._pool.append(candidate)
+                if candidate.track is not None:
+                    self._seen.add(candidate.track.track_id)
+            else:
+                log.info("Playlist: %s is not wanted now", candidate.title)
+                candidate.path.unlink(missing_ok=True)
+        waiting = {c.path for c in self._pool}
+        for path in self._workdir.iterdir():
+            # Only audio: the directory may be somebody's, and a mistake in
+            # the option must not take the cache or the token with it.
+            if path.suffix in AUDIO_SUFFIXES and path not in waiting:
+                path.unlink(missing_ok=True)
+        if self._pool:
+            self._added.set()
+        self._save_playlist()
+        log.info("Playlist of the last run: %d tracks", len(self._pool))
+        return len(self._pool)
+
+    def _candidate_back(self, entry: object) -> Candidate | None:
+        """Make a candidate of what was kept of it; None if it can't be."""
+        if self._cache is None:
+            return None
+        try:
+            if not isinstance(entry, dict):
+                raise TypeError("an entry is an object")  # noqa: TRY301
+            track = _track_back(entry["track"])
+            path = self._workdir / Path(str(entry["file"])).name
+            title = str(entry["title"])
+            mood = str(entry["mood"])
+        except (KeyError, TypeError, ValueError):
+            log.warning("Ignoring a damaged entry of the playlist")
+            return None
+        analysis = self._cache.get_analysis(track.track_id, track.codec)
+        if analysis is None or not path.is_file() or path.stat().st_size == 0:
+            log.info("Playlist: %s is gone, left out", title)
+            path.unlink(missing_ok=True)
+            return None
+        return Candidate(
+            title,
+            path,
+            analysis,
+            frozenset(track.artists),
+            track,
+            mood,
+            track.genre,
+        )
 
     def language_info(self) -> dict[str, object]:
         return {
@@ -694,6 +823,7 @@ class Radio:
             self._playing_id = now.track_id if now is not None else ""
         if source.path.exists():
             self._pool.append(source)
+            self._save_playlist()
 
     def _wanted(self, candidate: Candidate) -> bool:
         """Say whether the mood and the genre of a pool track are allowed."""
@@ -715,6 +845,7 @@ class Radio:
             if not self._wanted(candidate):
                 self._pool.remove(candidate)
                 candidate.path.unlink(missing_ok=True)
+                self._save_playlist()
 
     def set_wanted_genres(self, genres: Iterable[str]) -> None:
         """Pick the genres. The queue follows them once it is rebuilt."""
@@ -1072,6 +1203,7 @@ class Radio:
                 track.genre,
             )
         )
+        self._save_playlist()
         self._added.set()
 
     def _cached_analysis(self, track: Track) -> TrackAnalysis | None:
@@ -1142,6 +1274,7 @@ class Radio:
                 break
             extra += added
         self._pool.remove(candidate)
+        self._save_playlist()
         return candidate
 
     async def _replay_oldest(self) -> Candidate:
@@ -1224,6 +1357,7 @@ class Radio:
                 f", tempo glides by {abs(speed - 1):.1%}" if speed else "",
             )
             self._next = deck
+            self._save_playlist()
             return deck
 
     def transition(
@@ -1319,6 +1453,7 @@ class Radio:
             deck.source = None
         if self._next is deck:
             self._next = None
+            self._save_playlist()
         self._send_feedback(deck, Feedback.STARTED, 0.0)
 
     def finished(self, deck: Deck) -> None:
@@ -2595,21 +2730,33 @@ async def serve(
     effects: str = DEFAULT_EFFECTS,
     mood_arc: bool = False,
     cache: TrackCache | None = None,
+    tracks_dir: Path | None = None,
     ready: Event | None = None,
 ) -> None:
     """Serve the stream and the API, then mix until cancelled.
 
     The server is up before the app is authorized, so that /api/auth can
-    tell where to do it.
+    tell where to do it. With a cache and a `tracks_dir`, the tracks loaded
+    and waiting are kept there across restarts; without, they are in a
+    directory that goes with the run.
     """
-    with tempfile.TemporaryDirectory(prefix="yamusic-dj-") as workdir:
+    keep = cache is not None and tracks_dir is not None
+    if keep and tracks_dir is not None:
+        await asyncio.to_thread(tracks_dir.mkdir, parents=True, exist_ok=True)
+    workdir_context = (
+        contextlib.nullcontext(tracks_dir)
+        if keep
+        else tempfile.TemporaryDirectory(prefix="yamusic-dj-")
+    )
+    with workdir_context as workdir:
         radio = Radio(
             backend,
-            Path(workdir),
+            Path(str(workdir)),
             station_id=station_id,
             pool_size=pool_size,
             mood_arc=mood_arc,
             cache=cache,
+            keep_playlist=keep,
         )
         hub = Broadcaster()
         lossless = Broadcaster(
@@ -2647,6 +2794,10 @@ async def serve(
                 await radio.restore_state()
             except Exception:
                 log.exception("Could not take up the picks of the last run")
+            try:
+                radio.restore_playlist()
+            except Exception:
+                log.exception("Could not take up the playlist of the last run")
             if mood_arc and radio.mood_arc_saved is None:
                 await radio.start_mood_arc()
             log.info(

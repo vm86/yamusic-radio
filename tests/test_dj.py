@@ -774,25 +774,34 @@ def make_radio(
     *,
     mood_arc: bool = False,
     cache: TrackCache | None = None,
+    keep: bool = False,
 ) -> dj.Radio:
     """Make a radio whose tracks are 200 s of silence with a given tempo."""
     radio = dj.Radio(
-        backend, tmp_path, pool_size=4, mood_arc=mood_arc, cache=cache
+        backend,
+        tmp_path,
+        pool_size=4,
+        mood_arc=mood_arc,
+        cache=cache,
+        keep_playlist=keep,
     )
 
     async def prepare(track: Track) -> None:
         (tmp_path / f"{track.track_id}.mp3").write_bytes(b"x")
+        analysis = track_analysis(bpms.get(track.track_id, 120))
+        radio._store_analysis(track, track.title, analysis)  # noqa: SLF001
         radio.pool.append(
             dj.Candidate(
                 track.title,
                 tmp_path / f"{track.track_id}.mp3",
-                track_analysis(bpms.get(track.track_id, 120)),
+                analysis,
                 frozenset(track.artists),
                 track,
                 track.mood,
                 track.genre,
             )
         )
+        radio._save_playlist()  # noqa: SLF001
 
     monkeypatch.setattr(radio, "_download", stub_download)
     monkeypatch.setattr(radio, "prepare", prepare)
@@ -4022,3 +4031,144 @@ async def test_language_in_the_api(
         assert (
             await client.put("/api/language", json={"language": "russian"})
         ).status == 409
+
+
+@pytest.mark.asyncio
+async def test_the_loaded_tracks_are_still_there_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcd"]])
+    first = make_radio(
+        tmp_path, monkeypatch, backend, {}, cache=track_cache, keep=True
+    )
+    await first.fill(4)
+    titles = [c.title for c in first.pool]
+    assert len(titles) == 4
+
+    # The process ends. A new one finds the files and the cache.
+    again_backend = FakeBackend([[make_track(n) for n in "abcdef"]])
+    again = make_radio(
+        tmp_path, monkeypatch, again_backend, {}, cache=track_cache, keep=True
+    )
+    assert again.pool == []
+
+    assert again.restore_playlist() == 4
+
+    assert [c.title for c in again.pool] == titles
+    assert all(c.path.exists() for c in again.pool)
+    assert again.pool[0].track == make_track("a")  # the whole of the track
+    assert again.pool[0].analysis == track_analysis(120)  # from the cache
+    assert again_backend.downloaded == []  # nothing is downloaded again
+    # The station is not asked for what is here already.
+    await again.fill(6)
+    assert [c.title for c in again.pool][:4] == titles
+    assert {c.title for c in again.pool} == set("abcdef")
+
+
+@pytest.mark.asyncio
+async def test_what_is_waiting_goes_and_comes_as_the_tracks_are_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abc"]])
+    radio = make_radio(
+        tmp_path, monkeypatch, backend, {}, cache=track_cache, keep=True
+    )
+    await radio.fill(3)
+
+    def kept() -> list[str]:
+        saved = track_cache.get_setting("playlist")
+        assert isinstance(saved, list)
+        return [entry["title"] for entry in saved]
+
+    assert sorted(kept()) == ["a", "b", "c"]
+
+    first = await radio.next_deck(None)  # chosen, decoded: not yet played
+    assert kept()[0] == first.title  # the one that waits is kept first
+    assert sorted(kept()) == ["a", "b", "c"]
+
+    radio.started(first)  # played: it leaves the playlist, and its file
+    assert sorted(kept()) == sorted({"a", "b", "c"} - {first.title})
+    assert not (tmp_path / f"{first.title}.mp3").exists()
+
+    radio.refresh_queue()
+    radio.set_wanted_genres(["rock"])  # none of them is
+    radio.refresh_queue()
+    assert kept() == []
+
+
+def mp3_files(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir() if p.suffix == ".mp3")
+
+
+@pytest.mark.asyncio
+async def test_a_restart_leaves_out_what_is_gone_and_clears_the_rest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    track_cache: TrackCache,
+    cache_path: Path,
+) -> None:
+    backend = FakeBackend([[make_track(n, mood="calm") for n in "abcd"]])
+    first = make_radio(
+        tmp_path, monkeypatch, backend, {}, cache=track_cache, keep=True
+    )
+    await first.fill(4)
+    (tmp_path / "a.mp3").unlink()  # a file that is not there
+    (tmp_path / "b.mp3").write_bytes(b"")  # a download that was cut short
+    (tmp_path / "stray.mp3").write_bytes(b"x")  # a track that was playing
+    with sqlite3.connect(cache_path) as db:  # no analysis for "c"
+        db.execute("DELETE FROM tracks WHERE track_id = 'c'")
+    saved = track_cache.get_setting("playlist")
+    assert isinstance(saved, list)
+    track_cache.put_setting("playlist", [*saved, "junk", {"title": "x"}])
+
+    again = make_radio(
+        tmp_path, monkeypatch, FakeBackend([]), {}, cache=track_cache, keep=True
+    )
+
+    assert again.restore_playlist() == 1
+    assert [c.title for c in again.pool] == ["d"]
+    assert mp3_files(tmp_path) == ["d.mp3"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_keeps_only_the_tracks_that_are_wanted_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    backend = FakeBackend(
+        [[make_track("a", mood="calm"), make_track("b", mood="fun")]]
+    )
+    first = make_radio(
+        tmp_path, monkeypatch, backend, {}, cache=track_cache, keep=True
+    )
+    await first.fill(2)
+    track_cache.put_setting("moods", ["calm"])  # picked while it was down
+
+    again, _ = (
+        make_radio(
+            tmp_path,
+            monkeypatch,
+            FakeBackend([]),
+            {},
+            cache=track_cache,
+            keep=True,
+        ),
+        None,
+    )
+    await again.restore_state()
+    assert again.restore_playlist() == 1
+
+    assert [c.title for c in again.pool] == ["a"]
+    assert not (tmp_path / "b.mp3").exists()
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_kept_unless_it_is_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "ab"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {}, cache=track_cache)
+    await radio.fill(2)
+
+    assert track_cache.get_setting("playlist") is None
+    assert radio.restore_playlist() == 0
+    assert len(radio.pool) == 2

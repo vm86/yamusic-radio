@@ -60,6 +60,13 @@ export const en: Messages = {
   "moods.hint":
     "The mix will only go between the moods picked. The choice changes the station setting on your Yandex Music account.",
 
+  "language.title": "Music language",
+  "language.any": "Any",
+  "language.hint":
+    "The language is a setting of the station on your Yandex Music account. The tracks loaded already are replaced: only the next two stay.",
+  "lang.russian": "Russian",
+  "lang.not-russian": "Foreign",
+  "lang.without-words": "No lyrics",
   "genres.title": "Genres",
   "genres.any": "Any",
   "genres.tabPlay": "Play",
@@ -105,6 +112,9 @@ export const en: Messages = {
   "toast.skipFailed": "Could not go to the next track: {reason}",
   "toast.refreshed": "The queue was rebuilt from the loaded tracks",
   "toast.refreshFailed": "Could not rebuild the queue: {reason}",
+  "toast.language": "Music language: {language}",
+  "toast.languageOwn": "Music language: as on the account",
+  "toast.languageFailed": "Could not change the music language: {reason}",
   "toast.streamDown": "The stream is unavailable",
   "toast.playFailed": "Could not start playback: {reason}",
 };

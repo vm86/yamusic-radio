@@ -14,6 +14,7 @@ const queueOf = (moods: MoodsInfo): Queue => ({
   now: null,
   next: [],
   moods,
+  language: { available: ["any", "russian"], selected: null, station: "", steered: true },
   skip_pending: false,
   blending: false,
   can_skip: true,
@@ -30,6 +31,7 @@ const api = vi.hoisted(() => ({
   setGenres: vi.fn(),
   refreshQueue: vi.fn(),
   nextTrack: vi.fn(),
+  setLanguage: vi.fn(),
 }));
 vi.mock("../api", () => ({ api }));
 
@@ -97,6 +99,38 @@ describe("the next track button", () => {
     // Free: only the usual poll (at 3 s) is left, not one a second.
     await vi.advanceTimersByTimeAsync(2000);
     expect(api.queue).toHaveBeenCalledTimes(4);
+    wrapper.unmount();
+  });
+});
+
+describe("the language of the music", () => {
+  it("is set on the radio at once and shown from its answer", async () => {
+    const { radio, wrapper } = setup();
+    await settle();
+    api.setLanguage.mockResolvedValue({
+      available: ["any", "russian"],
+      selected: "russian",
+      station: "russian",
+      steered: true,
+    });
+
+    await radio.setLanguage("russian");
+
+    expect(api.setLanguage).toHaveBeenCalledWith("russian");
+    expect(radio.queue.value?.language.selected).toBe("russian");
+    expect(useToast().message.value).toBe("Язык музыки: Русский");
+    wrapper.unmount();
+  });
+
+  it("says when the radio refuses", async () => {
+    const { radio, wrapper } = setup();
+    await settle();
+    api.setLanguage.mockRejectedValue(new Error("the backend can't change the language"));
+
+    await radio.setLanguage("russian");
+
+    expect(useToast().message.value).toContain("Не удалось сменить язык музыки");
+    expect(radio.queue.value?.language.selected).toBeNull();
     wrapper.unmount();
   });
 });

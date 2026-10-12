@@ -3,12 +3,13 @@ import {
   api,
   type AuthInfo,
   type GenresInfo,
+  type LanguageInfo,
   type MoodsInfo,
   type Queue,
   type Stats,
 } from "../api";
 import { MOODS_DELAY_MS, POLL_MS, SKIP_POLL_MS } from "../constants";
-import { moodNames, t } from "../i18n";
+import { languageNames, moodNames, t } from "../i18n";
 import { toast } from "./useToast";
 
 function sameSet(a: string[], b: string[]): boolean {
@@ -130,6 +131,21 @@ export function useRadio() {
     }
   }
 
+  // The language is a setting of the account: one pick at a time, at once.
+  async function setLanguage(language: string | null): Promise<void> {
+    try {
+      const info: LanguageInfo = await api.setLanguage(language);
+      if (queue.value) queue.value = { ...queue.value, language: info };
+      toast(
+        language
+          ? t("toast.language", { language: languageNames()[language] ?? language })
+          : t("toast.languageOwn"),
+      );
+    } catch (error) {
+      toast(t("toast.languageFailed", { reason: (error as Error).message }));
+    }
+  }
+
   async function setGenres(list: string[]): Promise<void> {
     try {
       genres.value = await api.setGenres(list);
@@ -232,6 +248,7 @@ export function useRadio() {
     setBackend,
     signIn,
     setGenres,
+    setLanguage,
     setBlockedGenres,
     refreshQueue,
     nextTrack,

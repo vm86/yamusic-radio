@@ -70,6 +70,7 @@ function names(prefix: string): () => Record<string, string> {
 }
 
 export const moodNames = names("mood.");
+export const languageNames = names("lang.");
 export const transitionNames = names("transition.");
 export const effectNames = names("effect.");
 export const qualityNames = names("quality.");

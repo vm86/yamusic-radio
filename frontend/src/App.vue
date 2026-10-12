@@ -2,6 +2,7 @@
 import AppBar from "./components/AppBar.vue";
 import AuthCard from "./components/AuthCard.vue";
 import GenreCard from "./components/GenreCard.vue";
+import LanguageCard from "./components/LanguageCard.vue";
 import MoodCard from "./components/MoodCard.vue";
 import PlayerCard from "./components/PlayerCard.vue";
 import Snackbar from "./components/Snackbar.vue";
@@ -53,6 +54,12 @@ const spectrum = useSpectrum(player);
         :pending="radio.pendingMoods.value !== null && !radio.busy.value"
         :disabled="!radio.auth.value?.authorized"
         @change="radio.setMoods"
+      />
+      <LanguageCard
+        v-if="radio.queue.value?.language?.steered"
+        :language="radio.queue.value.language"
+        :disabled="!radio.auth.value?.authorized"
+        @change="radio.setLanguage"
       />
       <GenreCard v-if="radio.genres.value" :genres="radio.genres.value" @change="radio.setGenres" @block="radio.setBlockedGenres" />
       <StatsCard v-if="radio.stats.value" :stats="radio.stats.value" />

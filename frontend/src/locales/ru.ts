@@ -59,6 +59,13 @@ export const ru = {
   "moods.hint":
     "Микс будет только между выбранными настроениями. Выбор меняет настройку станции в вашем аккаунте Яндекс Музыки.",
 
+  "language.title": "Язык музыки",
+  "language.any": "Любой",
+  "language.hint":
+    "Язык — настройка станции в вашем аккаунте Яндекс Музыки. Уже загруженные треки заменяются: останутся только два ближайших.",
+  "lang.russian": "Русский",
+  "lang.not-russian": "Иностранный",
+  "lang.without-words": "Без слов",
   "genres.title": "Жанры",
   "genres.any": "Любые",
   "genres.tabPlay": "Играть",
@@ -104,6 +111,9 @@ export const ru = {
   "toast.skipFailed": "Не удалось перейти к следующему треку: {reason}",
   "toast.refreshed": "Очередь пересобрана из загруженных треков",
   "toast.refreshFailed": "Не удалось обновить очередь: {reason}",
+  "toast.language": "Язык музыки: {language}",
+  "toast.languageOwn": "Язык музыки: как в аккаунте",
+  "toast.languageFailed": "Не удалось сменить язык музыки: {reason}",
   "toast.streamDown": "Поток недоступен",
   "toast.playFailed": "Не удалось начать воспроизведение: {reason}",
 };

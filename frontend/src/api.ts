@@ -23,6 +23,17 @@ export interface MoodsInfo {
   station: string;
 }
 
+/** The language of the music: a setting of the station on the account. */
+export interface LanguageInfo {
+  available: string[];
+  /** Picked here; null is the account's own. */
+  selected: string | null;
+  /** What the station is set to ("" before it is known). */
+  station: string;
+  /** Can the backend change it. */
+  steered: boolean;
+}
+
 export interface GenresInfo {
   available: string[];
   selected: string[];
@@ -36,6 +47,7 @@ export interface Queue {
   now: NowTrack | null;
   next: TrackInfo[];
   moods: MoodsInfo;
+  language: LanguageInfo;
   /** The next track was asked for and its blend has not begun. */
   skip_pending: boolean;
   /** The blend is under way: the next track can't be asked for again yet. */
@@ -139,6 +151,10 @@ export const api = {
     genres.length
       ? put<GenresInfo>("api/genres", { genres })
       : request<GenresInfo>("api/genres", { method: "DELETE" }),
+  setLanguage: (language: string | null) =>
+    language
+      ? put<LanguageInfo>("api/language", { language })
+      : request<LanguageInfo>("api/language", { method: "DELETE" }),
   setBlockedGenres: (genres: string[]) =>
     genres.length
       ? put<GenresInfo>("api/genres/blocked", { genres })

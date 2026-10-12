@@ -80,6 +80,11 @@ DEFAULT_EFFECTS = "light"
 
 # Tracks downloaded and analyzed at the same time.
 PREPARE_CONCURRENCY = 3
+# Tracks decoded and analyzed at a time: each takes a few times its size in
+# memory, a decoded six-minute track being 127 MB. Downloads go on meanwhile.
+ANALYZE_CONCURRENCY = 1
+# What is read from ffmpeg at a time.
+DECODE_CHUNK = 1 << 20
 # Give up filling the pool after this many batches without a usable track:
 # the station only repeats itself.
 MAX_EMPTY_BATCHES = 5
@@ -386,12 +391,21 @@ async def decode_file(path: Path) -> Pcm:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    raw, _ = await proc.communicate()
+    stdout = proc.stdout
+    if stdout is None:
+        raise RuntimeError("ffmpeg has no output")
+    # Read into one growing buffer: communicate() keeps all the pieces and
+    # joins them, and slicing the result copies it again, 3 times the track.
+    raw = bytearray()
+    while chunk := await stdout.read(DECODE_CHUNK):
+        raw += chunk
+    await proc.wait()
     frame = 4 * CHANNELS
     usable = len(raw) // frame * frame
     if proc.returncode != 0 or not usable:
         raise RuntimeError(f"ffmpeg could not decode {path.name}")
-    pcm: Pcm = np.frombuffer(raw[:usable], dtype=np.float32).reshape(
+    # A view of the buffer, not a copy; the tail of a cut frame is left out.
+    pcm: Pcm = np.frombuffer(raw, dtype=np.float32, count=usable // 4).reshape(
         -1, CHANNELS
     )
     return pcm
@@ -485,6 +499,7 @@ class Radio:
         self._matched_transitions = 0
         self._key_pairs: Counter[tuple[str, str]] = Counter()
         self._slots = Semaphore(PREPARE_CONCURRENCY)
+        self._analyzing = Semaphore(ANALYZE_CONCURRENCY)
         self._load_lock = Lock()
         self._feedback_tasks: set[Task[None]] = set()
         self._added = Event()
@@ -1364,9 +1379,11 @@ class Radio:
                 await self._download(track, path)
                 analysis = self._cached_analysis(track)
                 if analysis is None:
-                    pcm = await decode_file(path)
-                    analysis = await asyncio.to_thread(dj_mix.analyze, pcm)
-                    del pcm
+                    # One at a time: it takes a few times the track in memory.
+                    async with self._analyzing:
+                        pcm = await decode_file(path)
+                        analysis = await asyncio.to_thread(dj_mix.analyze, pcm)
+                        del pcm
                     self._store_analysis(track, title, analysis)
                 self._store_genre(track)
                 mood = track.mood or dj_mix.mood_of(analysis)

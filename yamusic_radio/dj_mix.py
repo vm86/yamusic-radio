@@ -41,6 +41,9 @@ MIN_TEMPO_CONFIDENCE = 0.05
 
 # Samples quieter than this (about -40 dBFS) count as silence.
 SILENCE_LEVEL = 0.01
+# Samples handled at a time where a copy of the whole track would be big
+# (a six-minute track is 127 MB as float32 stereo).
+MEMORY_BLOCK = 1 << 20
 
 # Largest tempo change a blend glides through to match the previous track.
 MAX_TEMPO_SHIFT = 0.15
@@ -225,6 +228,8 @@ class TrackAnalysis:
 # with the Krumhansl-Kessler major and minor profiles.
 KEY_FRAME = 8192
 KEY_HOP = 16384
+# Frames of the key analysis taken at a time.
+KEY_BLOCK_FRAMES = 256
 KEY_MIN_HZ = 110.0
 KEY_MAX_HZ = 2000.0
 # Frames quieter than this share of the loudest one are not looked at.
@@ -363,15 +368,23 @@ def chroma(mono: Pcm) -> npt.NDArray[np.float64]:
     if not len(starts):
         return np.zeros(12)
     window = np.hanning(KEY_FRAME).astype(np.float32)
-    frames = np.stack([mono[i : i + KEY_FRAME] * window for i in starts])
-    # The square root keeps a loud bass note from drowning the harmony.
-    magnitude = np.sqrt(np.abs(np.fft.rfft(frames, axis=1))[:, usable])
-    per_frame = np.stack(
-        [
+    rows: list[npt.NDArray[np.float64]] = []
+    # A block of frames at a time: all of them at once are several times
+    # the size of the track.
+    for first in range(0, len(starts), KEY_BLOCK_FRAMES):
+        frames = np.stack(
+            [
+                mono[i : i + KEY_FRAME] * window
+                for i in starts[first : first + KEY_BLOCK_FRAMES]
+            ]
+        )
+        # The square root keeps a loud bass note from drowning the harmony.
+        magnitude = np.sqrt(np.abs(np.fft.rfft(frames, axis=1))[:, usable])
+        rows.extend(
             np.bincount(pitch_class, weights=row, minlength=12)
             for row in magnitude
-        ]
-    )
+        )
+    per_frame = np.stack(rows)
     totals = per_frame.sum(axis=1)
     per_frame = per_frame[totals > KEY_QUIET_RATIO * totals.max()]
     # Every frame counts the same, whatever its loudness.
@@ -527,10 +540,18 @@ def find_beat(
 
 
 def audible_range(pcm: Pcm) -> tuple[int, int]:
-    loud = np.flatnonzero(np.abs(pcm).max(axis=1) > SILENCE_LEVEL)
-    if not len(loud):
+    # In blocks: |pcm| of the whole track would be a copy of it.
+    first = last = -1
+    for begin in range(0, len(pcm), MEMORY_BLOCK):
+        block = pcm[begin : begin + MEMORY_BLOCK]
+        loud = np.flatnonzero(np.abs(block).max(axis=1) > SILENCE_LEVEL)
+        if len(loud):
+            if first < 0:
+                first = begin + int(loud[0])
+            last = begin + int(loud[-1])
+    if first < 0:
         return 0, len(pcm)
-    return int(loud[0]), int(loud[-1]) + 1
+    return first, last + 1
 
 
 def find_sections(mono: Pcm, start: int, bar: int) -> tuple[int, int]:
@@ -543,8 +564,16 @@ def find_sections(mono: Pcm, start: int, bar: int) -> tuple[int, int]:
     count = len(mono) // bar
     if count < MIN_BARS_FOR_STRUCTURE:
         return -1, -1
-    bars = mono[: count * bar].reshape(count, bar).astype(np.float64)
-    levels = 10 * np.log10(np.mean(bars**2, axis=1) + 1e-12)
+    bars = mono[: count * bar].reshape(count, bar)
+    # A few bars at a time: all of them as float64 would be 2 copies.
+    step = max(1, MEMORY_BLOCK // bar)
+    means = np.concatenate(
+        [
+            np.mean(bars[i : i + step].astype(np.float64) ** 2, axis=1)
+            for i in range(0, count, step)
+        ]
+    )
+    levels = 10 * np.log10(means + 1e-12)
     loud = np.flatnonzero(levels >= np.median(levels) - SECTION_THRESHOLD_DB)
     return start + int(loud[0]) * bar, start + (int(loud[-1]) + 1) * bar
 
@@ -553,6 +582,15 @@ def _snap(position: int, grid_beat: float, bar: float, *, up: bool) -> int:
     """Move a position onto the bar grid, later (up) or earlier."""
     bars = (position - grid_beat) / bar
     return round(grid_beat + (ceil(bars) if up else floor(bars)) * bar)
+
+
+def mean_square(pcm: Pcm) -> float:
+    """Return the mean of the squares, summed in float64 a block at a time."""
+    total = 0.0
+    for begin in range(0, len(pcm), MEMORY_BLOCK):
+        block = pcm[begin : begin + MEMORY_BLOCK]
+        total += float(np.square(block, dtype=np.float64).sum())
+    return total / pcm.size if pcm.size else 0.0
 
 
 def analyze(pcm: Pcm) -> TrackAnalysis:
@@ -586,7 +624,7 @@ def analyze(pcm: Pcm) -> TrackAnalysis:
         if outro_start <= intro_end:
             intro_end = outro_start = -1
 
-    rms = float(np.sqrt(np.mean(np.square(body, dtype=np.float64)) + 1e-12))
+    rms = float(np.sqrt(mean_square(body) + 1e-12))
     return TrackAnalysis(
         bpm=bpm,
         head_beat=head_beat,

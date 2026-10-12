@@ -92,6 +92,76 @@ def test_analyze_noise_has_no_tempo() -> None:
     assert dj_mix.analyze(noise.astype(np.float32)).bpm == 0.0
 
 
+def test_analysis_in_small_blocks_gives_the_same_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = np.concatenate(
+        [np.zeros((SR, 2), np.float32), click_track(124, 90), pcm_silence()]
+    )
+    whole = dj_mix.analyze(pcm)
+
+    monkeypatch.setattr(dj_mix, "MEMORY_BLOCK", 10_007)
+    monkeypatch.setattr(dj_mix, "KEY_BLOCK_FRAMES", 3)
+    blocks = dj_mix.analyze(pcm)
+
+    assert dataclasses.replace(blocks, loudness_db=0) == dataclasses.replace(
+        whole, loudness_db=0
+    )
+    assert blocks.loudness_db == pytest.approx(whole.loudness_db, abs=1e-9)
+
+
+def pcm_silence() -> np.ndarray:
+    return np.zeros((SR * 2, 2), np.float32)
+
+
+def test_audible_range_is_found_across_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dj_mix, "MEMORY_BLOCK", 1000)
+    pcm = np.zeros((5500, 2), np.float32)
+    pcm[2999, 1] = 0.5  # the last sample of a block
+    pcm[4000, 0] = -0.5  # the first of another
+    assert dj_mix.audible_range(pcm) == (2999, 4001)
+
+    assert dj_mix.audible_range(np.zeros((5500, 2), np.float32)) == (0, 5500)
+    assert dj_mix.audible_range(pcm[:0]) == (0, 0)
+
+
+def test_mean_square_is_the_same_in_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pcm = np.random.default_rng(3).normal(0, 0.2, (9999, 2)).astype(np.float32)
+    whole = float(np.mean(np.square(pcm, dtype=np.float64)))
+
+    monkeypatch.setattr(dj_mix, "MEMORY_BLOCK", 1000)
+
+    assert dj_mix.mean_square(pcm) == pytest.approx(whole, rel=1e-12)
+    assert dj_mix.mean_square(pcm[:0]) == 0.0
+
+
+@pytest.mark.skipif(not dj.is_available(), reason="needs ffmpeg")
+@pytest.mark.asyncio
+async def test_decode_file_gives_the_samples_of_the_file(
+    tmp_path: Path,
+) -> None:
+    import wave  # noqa: PLC0415
+
+    wave_path = tmp_path / "t.wav"
+    tone = (np.sin(2 * np.pi * 440 * np.arange(SR) / SR) * 16000).astype("<i2")
+    with wave.open(str(wave_path), "wb") as out:
+        out.setnchannels(2)
+        out.setsampwidth(2)
+        out.setframerate(SR)
+        out.writeframes(np.stack([tone, tone // 2], axis=1).tobytes())
+
+    pcm = await dj.decode_file(wave_path)
+
+    assert pcm.dtype == np.float32
+    assert pcm.shape == (SR, 2)
+    assert pcm[:, 0] == pytest.approx(tone / 32768, abs=1e-4)
+    assert pcm[:, 1] == pytest.approx((tone // 2) / 32768, abs=1e-4)
+
+
 def test_tempo_ratio_allows_half_and_double_time() -> None:
     assert dj_mix.tempo_ratio(120, 120) == 1
     assert dj_mix.tempo_ratio(120, 240) == 1

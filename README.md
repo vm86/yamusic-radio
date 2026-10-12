@@ -106,7 +106,7 @@ with Web Audio.
 ## Key detection
 
 The key is found by [Essentia](https://essentia.upf.edu/) (`pip install
-".[key]"`; wheels exist for x86_64, the Docker image has it, and it needs
+".[key]"`; wheels exist for Linux x86_64 and macOS (arm64 and x86_64), the Docker image and the RPM have it, and it needs
 `libatomic`) with its `edma` profile, made for electronic music. Where
 Essentia has no answer, and when it is not installed, a simpler match of the
 pitch-class profile with the Krumhansl-Kessler profiles gives the key; the log

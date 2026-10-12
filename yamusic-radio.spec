@@ -33,7 +33,7 @@ cd %{name}-%{version}
 export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 %{python3} -m venv %{_builddir}/venv
 %{_builddir}/venv/bin/pip install --no-cache-dir pyinstaller
-# Essentia finds the keys; it has wheels for x86_64 only. Without it the
+# Essentia finds the keys; it has wheels for Linux x86_64 and macOS. Without it the
 # program falls back to a simpler (and worse) key detection.
 if %{_builddir}/venv/bin/pip install --no-cache-dir ".[key]"; then
     collect="--collect-all essentia"

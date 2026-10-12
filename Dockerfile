@@ -16,7 +16,7 @@ RUN dnf install -y --setopt=install_weak_deps=False python3 python3-pip \
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yamusic_radio ./yamusic_radio
-# Essentia finds the keys; it has wheels for x86_64 only, elsewhere the
+# Essentia finds the keys; it has wheels for Linux x86_64 only, elsewhere the
 # program falls back to a simpler (and worse) key detection.
 RUN python3 -m venv /opt/venv \
     && (/opt/venv/bin/pip install ".[key]" || /opt/venv/bin/pip install .)

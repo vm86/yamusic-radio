@@ -2787,8 +2787,27 @@ def add_api(
     _add_stats_api(app, radio)
 
 
-def _add_web_page(app: web.Application) -> None:
-    """Add the page and its scripts, built by `npm run build` in frontend/."""
+def web_page_built() -> bool:
+    """Say whether this build has the page (a backend-only one has not)."""
+    return WEB_PAGE.is_file()
+
+
+def _add_web_page(app: web.Application, *, serve: bool = True) -> None:
+    """Add the page and its scripts, built by `npm run build` in frontend/.
+
+    Without them (a backend-only build, or --no-web) the stream and the API
+    are all there is, and the root says so.
+    """
+
+    async def no_page(_: web.Request) -> web.Response:
+        return web.json_response(
+            {"web": False, "stream": "/stream", "api": "/api/queue"},
+            status=404,
+        )
+
+    if not serve or not web_page_built():
+        app.router.add_get("/", no_page)
+        return
 
     async def index(_: web.Request) -> web.Response:
         return web.Response(
@@ -2915,6 +2934,7 @@ def make_app(
     spectrum: SpectrumFeed | None = None,
     *,
     ogg: Broadcaster | None = None,
+    page: bool = True,
 ) -> web.Application:
     app = web.Application()
     starts = StartPositions()
@@ -2938,7 +2958,7 @@ def make_app(
         )
     if spectrum is not None:
         _add_spectrum_api(app, spectrum, starts)
-    _add_web_page(app)
+    _add_web_page(app, serve=page)
     if radio is not None:
         add_api(app, radio, backends)
     return app
@@ -3182,6 +3202,7 @@ async def serve(
     mood_arc: bool = False,
     cache: TrackCache | None = None,
     tracks_dir: Path | None = None,
+    page: bool = True,
     ready: Event | None = None,
 ) -> None:
     """Serve the stream and the API, then mix until cancelled.
@@ -3189,7 +3210,8 @@ async def serve(
     The server is up before the app is authorized, so that /api/auth can
     tell where to do it. With a cache and a `tracks_dir`, the tracks loaded
     and waiting are kept there across restarts; without, they are in a
-    directory that goes with the run.
+    directory that goes with the run. Without `page` the web page is not
+    served, whether the build has it or not.
     """
     keep = cache is not None and tracks_dir is not None
     if keep and tracks_dir is not None:
@@ -3231,6 +3253,7 @@ async def serve(
                 lossless,
                 spectrum,
                 ogg=ogg,
+                page=page,
             ),
             access_log=None,
         )

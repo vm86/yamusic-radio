@@ -180,6 +180,15 @@ def parse_args() -> Namespace:
         ),
     )
     parser.add_argument(
+        "--no-web",
+        action="store_true",
+        default=False,
+        help=(
+            "Serve the stream and the API only, not the web page (a build "
+            "made with YAMUSIC_BACKEND_ONLY=1 has no page to serve)"
+        ),
+    )
+    parser.add_argument(
         "--no-keep-tracks",
         action="store_true",
         default=False,
@@ -311,6 +320,7 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
             mood_arc=options.mood_arc,
             cache=cache,
             tracks_dir=_tracks_dir(options, cache),
+            page=not options.no_web,
             ready=ready,
         )
     )

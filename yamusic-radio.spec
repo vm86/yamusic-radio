@@ -1,3 +1,6 @@
+# rpmbuild --with backend_only: no web page, the stream and the API only.
+%bcond_with backend_only
+
 Name:           yamusic-radio
 # CI passes the version of the tag: rpmbuild --define "pkg_version 1.2.3"
 Version:        %{?pkg_version}%{!?pkg_version:0.1.0}
@@ -32,6 +35,7 @@ tar -xzf %{_sourcedir}/%{name}-%{version}.tar.gz
 cd %{name}-%{version}
 export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 %{python3} -m venv %{_builddir}/venv
+%{?with_backend_only:export YAMUSIC_BACKEND_ONLY=1}
 %{_builddir}/venv/bin/pip install --no-cache-dir pyinstaller
 # Essentia finds the keys; it has wheels for x86_64 only. Without it the
 # program falls back to a simpler (and worse) key detection.

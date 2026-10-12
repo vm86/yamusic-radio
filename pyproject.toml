@@ -124,3 +124,9 @@ pretty = true
 [[tool.mypy.overrides]]
 module = ["essentia", "essentia.*"]
 ignore_missing_imports = true
+
+# setuptools has no stubs here: setup.py only makes the web page optional.
+[[tool.mypy.overrides]]
+module = ["setuptools", "setuptools.*", "setup"]
+ignore_missing_imports = true
+disallow_subclassing_any = false

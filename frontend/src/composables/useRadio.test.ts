@@ -32,6 +32,9 @@ const api = vi.hoisted(() => ({
   refreshQueue: vi.fn(),
   nextTrack: vi.fn(),
   setLanguage: vi.fn(),
+  playTrack: vi.fn(),
+  moveTrack: vi.fn(),
+  removeTrack: vi.fn(),
 }));
 vi.mock("../api", () => ({ api }));
 
@@ -99,6 +102,66 @@ describe("the next track button", () => {
     // Free: only the usual poll (at 3 s) is left, not one a second.
     await vi.advanceTimersByTimeAsync(2000);
     expect(api.queue).toHaveBeenCalledTimes(4);
+    wrapper.unmount();
+  });
+});
+
+describe("the queue changed by hand", () => {
+  const withNext = (...titles: string[]): Queue => ({
+    ...queueOf(moodsOf([])),
+    next: titles.map((id) => ({
+      track_id: id,
+      title: `Track ${id}`,
+      artists: [],
+      bpm: 120,
+      loudness_db: -9,
+      duration_seconds: 200,
+      mood: "calm",
+      camelot: "",
+      key: "",
+      decided: true,
+      cover: "",
+      pinned: false,
+    })),
+  });
+
+  it("takes the queue the radio answers with, and says what was done", async () => {
+    api.queue.mockResolvedValue(withNext("a", "b", "c"));
+    const { radio, wrapper } = setup();
+    await settle();
+
+    api.playTrack.mockResolvedValue(withNext("c", "a", "b"));
+    await radio.playTrack("c");
+    expect(api.playTrack).toHaveBeenCalledWith("c");
+    expect(radio.queue.value?.next.map((t) => t.track_id)).toEqual(["c", "a", "b"]);
+    expect(useToast().message.value).toBe("Следующим играет: Track c");
+
+    api.moveTrack.mockResolvedValue(withNext("a", "c", "b"));
+    await radio.moveTrack("a", 0);
+    expect(api.moveTrack).toHaveBeenCalledWith("a", 0);
+    expect(radio.queue.value?.next[0]?.track_id).toBe("a");
+
+    api.removeTrack.mockResolvedValue(withNext("a", "b"));
+    await radio.removeTrack("c");
+    expect(radio.queue.value?.next).toHaveLength(2);
+    expect(useToast().message.value).toBe("Убрано из очереди: Track c");
+    wrapper.unmount();
+  });
+
+  it("says that a blend is under way, and leaves the queue as it was", async () => {
+    api.queue.mockResolvedValue(withNext("a", "b"));
+    const { radio, wrapper } = setup();
+    await settle();
+    api.removeTrack.mockRejectedValue(new Error("a transition is under way: the next track is fixed"));
+
+    await radio.removeTrack("a");
+
+    expect(useToast().message.value).toBe("Идёт переход: ближайший трек менять нельзя");
+    expect(radio.queue.value?.next).toHaveLength(2);
+
+    api.moveTrack.mockRejectedValue(new Error("not in the queue: z"));
+    await radio.moveTrack("z", 0);
+    expect(useToast().message.value).toContain("Не удалось изменить очередь");
     wrapper.unmount();
   });
 });
@@ -296,6 +359,7 @@ describe("the next track button", () => {
     key: "",
     decided: true,
     cover: "",
+    pinned: false,
   });
 
   it("marks the request as waiting without touching the lists", async () => {

@@ -11,6 +11,8 @@ export interface TrackInfo {
   decided: boolean;
   /** The cover's URL with %% where the size goes, "" if there is none. */
   cover: string;
+  /** Put where it is by hand: the radio doesn't move it. */
+  pinned: boolean;
 }
 
 export interface NowTrack extends TrackInfo {
@@ -154,6 +156,10 @@ export const api = {
     genres.length
       ? put<GenresInfo>("api/genres", { genres })
       : request<GenresInfo>("api/genres", { method: "DELETE" }),
+  moveTrack: (track_id: string, position: number) => post<Queue>("api/queue/move", { track_id, position }),
+  removeTrack: (trackId: string) =>
+    request<Queue>(`api/queue/tracks/${encodeURIComponent(trackId)}`, { method: "DELETE" }),
+  playTrack: (track_id: string) => post<Queue>("api/queue/play", { track_id }),
   setLanguage: (language: string | null) =>
     language
       ? put<LanguageInfo>("api/language", { language })

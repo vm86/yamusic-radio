@@ -185,6 +185,27 @@ export function useRadio() {
     }
   }
 
+  // The queue is changed on the radio, which answers with the new queue.
+  async function changeQueue(change: () => Promise<Queue>, done?: string): Promise<void> {
+    try {
+      takeQueue(await change());
+      if (done) toast(done);
+    } catch (error) {
+      const reason = (error as Error).message;
+      toast(reason.includes("under way") ? t("toast.queueBusy") : t("toast.queueFailed", { reason }));
+    }
+  }
+
+  function titleOf(id: string): string {
+    return queue.value?.next.find((track) => track.track_id === id)?.title ?? id;
+  }
+
+  const playTrack = (id: string): Promise<void> =>
+    changeQueue(() => api.playTrack(id), t("toast.queuePlay", { title: titleOf(id) }));
+  const moveTrack = (id: string, position: number): Promise<void> => changeQueue(() => api.moveTrack(id, position));
+  const removeTrack = (id: string): Promise<void> =>
+    changeQueue(() => api.removeTrack(id), t("toast.queueRemoved", { title: titleOf(id) }));
+
   async function refreshQueue(): Promise<void> {
     refreshing.value = true;
     try {
@@ -252,5 +273,8 @@ export function useRadio() {
     setBlockedGenres,
     refreshQueue,
     nextTrack,
+    playTrack,
+    moveTrack,
+    removeTrack,
   };
 }

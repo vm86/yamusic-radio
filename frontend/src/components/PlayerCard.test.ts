@@ -15,6 +15,7 @@ const now: NowTrack = {
   key: "A minor",
   decided: true,
   cover: "",
+  pinned: false,
   elapsed_seconds: 10,
 };
 

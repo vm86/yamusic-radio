@@ -78,7 +78,15 @@ const spectrum = useSpectrum(player);
           </button>
         </div>
         <p class="hint">{{ t("queue.forecastHint") }}</p>
-        <TrackList :tracks="radio.queue.value?.next ?? []" :empty="t('queue.loading')" kind="queue" />
+        <TrackList
+          :tracks="radio.queue.value?.next ?? []"
+          :empty="t('queue.loading')"
+          kind="queue"
+          :blending="radio.queue.value?.blending ?? false"
+          @play="radio.playTrack"
+          @move="radio.moveTrack"
+          @remove="radio.removeTrack"
+        />
       </section>
     </div>
   </main>

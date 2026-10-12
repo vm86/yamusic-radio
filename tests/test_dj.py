@@ -4362,3 +4362,298 @@ async def test_the_ogg_stream_is_served_and_the_mix_is_encoded_for_it(
         response.close()
     async with TestClient(TestServer(dj.make_app(dj.Broadcaster()))) as client:
         assert (await client.get("/stream.ogg")).status == 404
+
+
+def next_ids(radio: dj.Radio) -> list[str]:
+    queue = cast("dict[str, Any]", radio.queue())
+    return [t["track_id"] for t in queue["next"]]
+
+
+async def radio_with_tracks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    names: str = "abcd",
+    *,
+    cache: TrackCache | None = None,
+    keep: bool = False,
+) -> dj.Radio:
+    backend = FakeBackend([[make_track(n) for n in names]])
+    radio = make_radio(
+        tmp_path, monkeypatch, backend, {}, cache=cache, keep=keep
+    )
+    await radio.fill(len(names))
+    return radio
+
+
+@pytest.mark.asyncio
+async def test_a_track_moved_by_hand_is_played_where_it_was_put(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    before = next_ids(radio)
+    assert sorted(before) == ["a", "b", "c", "d"]
+
+    radio.queue_move("d", 0)
+    radio.queue_move("b", 1)
+
+    queue = cast("dict[str, Any]", radio.queue())
+    assert next_ids(radio)[:2] == ["d", "b"]
+    assert [t["pinned"] for t in queue["next"]][:2] == [True, True]
+    assert sorted(next_ids(radio)) == ["a", "b", "c", "d"]
+    # And the radio plays them so, ahead of its own choice.
+    first = await radio.next_deck(None)
+    assert first.title == "d"
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+    assert second.title == "b"
+    assert next_ids(radio)[:1] == ["b"]  # what is playing leaves the order
+    radio.queue_move("b", 99)  # past the end: the end
+    assert next_ids(radio)[-1] == "b"
+
+
+@pytest.mark.asyncio
+async def test_a_new_first_track_replaces_the_one_that_was_decoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    now = await radio.next_deck(None)
+    radio.started(now)
+    decoded = await radio.next_deck(now.analysis)
+    other = next(i for i in next_ids(radio) if i != decoded.title)
+    assert next_ids(radio)[0] == decoded.title
+
+    radio.queue_move(other, 0)
+
+    assert radio.is_stale(decoded)  # the mix chooses again at once
+    assert next_ids(radio)[0] == other
+    assert decoded.title in next_ids(radio)  # back in the queue
+    again = await radio.next_deck(now.analysis)
+    assert again.title == other
+    # Putting a track behind the first does not touch what is decoded.
+    radio.queue_move(decoded.title, 1)
+    assert not radio.is_stale(again)
+
+
+@pytest.mark.asyncio
+async def test_the_order_is_set_in_one_go_and_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+
+    radio.queue_order(["c", "a", "c"])  # twice: once
+
+    assert next_ids(radio)[:2] == ["c", "a"]
+    assert sorted(next_ids(radio)) == ["a", "b", "c", "d"]  # the rest follows
+    with pytest.raises(dj.UnknownQueueTrackError):
+        radio.queue_order(["c", "zzz"])
+    with pytest.raises(dj.UnknownQueueTrackError):
+        radio.queue_move("zzz", 0)
+    assert next_ids(radio)[:2] == ["c", "a"]  # nothing was changed
+    radio.queue_order([])  # the radio's own choice again
+    assert not any(
+        t["pinned"] for t in cast("dict[str, Any]", radio.queue())["next"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_track_taken_out_of_the_queue_is_gone_for_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch, cache=track_cache)
+    victim = radio.pool[0]
+    assert victim.path.exists()
+
+    radio.queue_remove(victim.title)
+
+    assert victim.title not in next_ids(radio)
+    assert len(radio.pool) == 3
+    assert not victim.path.exists()
+    # Not loaded again after a restart: it counts as played.
+    assert victim.title in track_cache.recently_played(10)
+    with pytest.raises(dj.UnknownQueueTrackError):
+        radio.queue_remove(victim.title)
+
+
+@pytest.mark.asyncio
+async def test_the_decoded_next_track_can_be_taken_out_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    now = await radio.next_deck(None)
+    radio.started(now)
+    decoded = await radio.next_deck(now.analysis)
+
+    radio.queue_remove(decoded.title)
+
+    assert radio.is_stale(decoded)
+    assert decoded.title not in next_ids(radio)
+    again = await radio.next_deck(now.analysis)
+    assert again.title != decoded.title
+
+
+@pytest.mark.asyncio
+async def test_what_is_being_blended_in_is_fixed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    first = await radio.next_deck(None)
+    radio.started(first)
+    second = await radio.next_deck(first.analysis)
+    third = next(i for i in next_ids(radio) if i != second.title)
+    radio.transition(dj_mix.Transition.BASS_SWAP, first, second)
+
+    with pytest.raises(dj.QueueChangeRefusedError):
+        radio.queue_remove(second.title)
+    with pytest.raises(dj.QueueChangeRefusedError):
+        radio.queue_move(third, 0)
+    with pytest.raises(dj.SkipRefusedError):
+        radio.queue_play(third)
+    # What comes after it can be changed.
+    radio.queue_move(third, 1)
+    assert next_ids(radio)[:2] == [second.title, third]
+    radio.queue_remove(next_ids(radio)[-1])
+
+    radio.started(second)
+    radio.finished(first)
+    radio.queue_move(third, 0)  # the blend is over: free again
+    assert next_ids(radio)[0] == third
+
+
+@pytest.mark.asyncio
+async def test_a_track_can_be_played_next_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    with pytest.raises(dj.SkipRefusedError, match="nothing is playing"):
+        radio.queue_play("a")  # nothing plays yet
+    now = await radio.next_deck(None)
+    radio.started(now)
+    await radio.next_deck(now.analysis)
+    chosen = next_ids(radio)[-1]
+
+    radio.queue_play(chosen)
+
+    assert radio.skip_requested  # the blend begins on a good beat
+    assert next_ids(radio)[0] == chosen
+    assert (await radio.next_deck(now.analysis)).title == chosen
+    with pytest.raises(dj.UnknownQueueTrackError):
+        radio.queue_play("zzz")
+    assert next_ids(radio)[0] == chosen  # and nothing was changed
+
+
+@pytest.mark.asyncio
+async def test_the_order_by_hand_comes_back_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    radio = await radio_with_tracks(
+        tmp_path, monkeypatch, cache=track_cache, keep=True
+    )
+    radio.queue_order(["d", "c"])
+
+    again = make_radio(
+        tmp_path, monkeypatch, FakeBackend([]), {}, cache=track_cache, keep=True
+    )
+    assert again.restore_playlist() == 4
+
+    assert next_ids(again)[:2] == ["d", "c"]
+    assert [t["pinned"] for t in cast("dict[str, Any]", again.queue())["next"]][
+        :3
+    ] == [True, True, False]
+
+
+class StaleOnce(FakeRadio):
+    """A radio whose first deck went stale."""
+
+    def __init__(self, decks: list[dj.Deck]) -> None:
+        super().__init__(decks)
+        self.stale = True
+
+    def is_stale(self, _deck: dj.Deck) -> bool:
+        return self.stale
+
+
+@pytest.mark.asyncio
+async def test_the_mix_chooses_again_at_once_when_the_queue_changed() -> None:
+    radio = StaleOnce(
+        [
+            deck("one", 120, 0.3, matched=False),
+            deck("two", 120, 0.3, matched=False),
+        ]
+    )
+    current = deck("now", 120, 0.3, matched=False)
+    old = await radio.next_deck(current.analysis)
+    task = asyncio.get_running_loop().create_future()
+    task.set_result(old)
+    finished = asyncio.ensure_future(asyncio.sleep(0, result=old))
+    await finished
+
+    same = dj._fresh(radio, current, finished)  # noqa: SLF001
+    assert same is not finished  # stale: asked for again, not waited for
+    assert (await same).title == "two"
+    radio.stale = False
+    assert dj._fresh(radio, current, same) is same  # noqa: SLF001
+    pending = asyncio.ensure_future(asyncio.sleep(10, result=old))
+    assert dj._fresh(radio, current, pending) is pending  # noqa: SLF001
+    pending.cancel()
+
+
+@pytest.mark.asyncio
+async def test_the_queue_is_changed_in_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio = await radio_with_tracks(tmp_path, monkeypatch)
+    now = await radio.next_deck(None)
+    radio.started(now)
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        queue = await (await client.get("/api/queue")).json()
+        ids = [t["track_id"] for t in queue["next"]]
+        assert len(ids) == 3
+        assert all(t["pinned"] is False for t in queue["next"])
+
+        reply = await client.put(
+            "/api/queue/order", json={"track_ids": list(reversed(ids))}
+        )
+        assert reply.status == 200
+        answer = await reply.json()
+        assert [t["track_id"] for t in answer["next"]] == ids[::-1]
+        assert answer["next"][0]["pinned"] is True
+
+        reply = await client.post(
+            "/api/queue/move", json={"track_id": ids[0], "position": 0}
+        )
+        moved = (await reply.json())["next"]
+        assert moved[0]["track_id"] == ids[0]
+
+        reply = await client.delete(f"/api/queue/tracks/{ids[1]}")
+        assert reply.status == 200
+        assert ids[1] not in [
+            t["track_id"] for t in (await reply.json())["next"]
+        ]
+
+        reply = await client.post("/api/queue/play", json={"track_id": ids[2]})
+        assert reply.status == 202
+        played = await reply.json()
+        assert played["next"][0]["track_id"] == ids[2]
+        assert played["skip_pending"] is True
+
+        gone = await client.delete("/api/queue/tracks/nowhere")
+        assert gone.status == 404
+        for path, body in (
+            ("/api/queue/order", {"track_ids": "a"}),
+            ("/api/queue/order", {"track_ids": [1]}),
+            ("/api/queue/move", {"track_id": "a"}),
+            ("/api/queue/move", {"track_id": "a", "position": True}),
+            ("/api/queue/play", {}),
+        ):
+            sent = (
+                client.put(path, json=body)
+                if path.endswith("order")
+                else client.post(path, json=body)
+            )
+            assert (await sent).status == 400
+        missing = await client.put(
+            "/api/queue/order", json={"track_ids": ["zzz"]}
+        )
+        assert missing.status == 404

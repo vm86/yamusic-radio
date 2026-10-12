@@ -106,6 +106,8 @@ SETTING_BLOCKED = "blocked_genres"
 SETTING_STATION = "station_settings"
 SETTING_LANGUAGE = "language"
 # The tracks loaded and waiting for their turn: the files are kept as well.
+# The order of the queue that was put in place by hand.
+SETTING_ORDER = "queue_order"
 # What a download can be called, of the ones that are cleared away.
 AUDIO_SUFFIXES = frozenset(
     {
@@ -233,6 +235,14 @@ class SkipRefusedError(Exception):
     """The next track can't be asked for now."""
 
 
+class QueueChangeRefusedError(Exception):
+    """The queue can't be changed that way now (a blend is under way)."""
+
+
+class UnknownQueueTrackError(KeyError):
+    """The track is not in the queue."""
+
+
 @dataclass(frozen=True, slots=True)
 class TrackInfo:
     """A track as the API shows it."""
@@ -251,6 +261,8 @@ class TrackInfo:
     decided: bool = True
     # The cover's URL, "%%" for the size; "" when there is none.
     cover: str = ""
+    # Put where it is by hand: the radio doesn't move it.
+    pinned: bool = False
 
     @classmethod
     def of(
@@ -261,6 +273,7 @@ class TrackInfo:
         mood: str,
         *,
         decided: bool = True,
+        pinned: bool = False,
     ) -> TrackInfo:
         return cls(
             track.track_id if track is not None else "",
@@ -274,6 +287,7 @@ class TrackInfo:
             analysis.key_name,
             decided,
             track.cover if track is not None else "",
+            pinned,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -289,6 +303,7 @@ class TrackInfo:
             "key": self.key,
             "decided": self.decided,
             "cover": self.cover,
+            "pinned": self.pinned,
         }
 
 
@@ -441,6 +456,9 @@ class Radio:
         self._blending = False
         self._heard_seconds: float | None = None
         self._next: Deck | None = None
+        # The order of the tracks put in place by hand (their ids), first
+        # to play first; the rest of the queue is the radio's choice.
+        self._order: list[str] = []
         self._before: deque[TrackInfo] = deque(maxlen=MAX_LISTED)
         # Only these station moods are played; empty is any.
         self._allowed_moods: tuple[str, ...] = ()
@@ -697,6 +715,7 @@ class Radio:
             if c is not None and c.track is not None and c.path.exists()
         ]
         self._remember(SETTING_PLAYLIST, entries)
+        self._remember(SETTING_ORDER, self._order)
 
     def restore_playlist(self) -> int:
         """Take back the tracks of the last run that were loaded and waiting.
@@ -728,6 +747,15 @@ class Radio:
             # the option must not take the cache or the token with it.
             if path.suffix in AUDIO_SUFFIXES and path not in waiting:
                 path.unlink(missing_ok=True)
+        order = self._cache.get_setting(SETTING_ORDER)
+        waiting_ids = {
+            c.track.track_id for c in self._pool if c.track is not None
+        }
+        self._order = [
+            i
+            for i in (order if isinstance(order, list) else [])
+            if isinstance(i, str) and i in waiting_ids
+        ]
         if self._pool:
             self._added.set()
         self._save_playlist()
@@ -825,6 +853,113 @@ class Radio:
         if source.path.exists():
             self._pool.append(source)
             self._save_playlist()
+
+    def _is_pinned(self, track: Track | None) -> bool:
+        return track is not None and track.track_id in self._order
+
+    def _pinned(self, pool: list[Candidate]) -> list[Candidate]:
+        """List the tracks of the pool that were put in place, in order."""
+        by_id = {c.track.track_id: c for c in pool if c.track is not None}
+        return [by_id[i] for i in self._order if i in by_id]
+
+    def _queue_ids(self) -> list[str]:
+        """List the ids of the tracks the API shows as coming."""
+        return [t.track_id for t in self.upcoming(MAX_LISTED) if t.track_id]
+
+    def _restart_next(self) -> None:
+        """Choose the next track anew: the one decoded goes back to the pool."""
+        self._generation += 1
+        deck, self._next = self._next, None
+        if deck is not None:
+            self._unpick(deck)
+        self._consumed.set()
+
+    def _locked(self, track_id: str) -> bool:
+        """Say whether the track is the one being blended in just now."""
+        deck = self._next
+        return (
+            self._blending
+            and deck is not None
+            and deck.track is not None
+            and deck.track.track_id == track_id
+        )
+
+    def _set_order(self, ids: list[str]) -> None:
+        """Put the tracks in this order; what comes first is played first."""
+        coming = self._queue_ids()
+        unknown = [i for i in ids if i not in coming]
+        if unknown:
+            raise UnknownQueueTrackError(unknown[0])
+        ids = list(dict.fromkeys(ids))
+        blending_in = self._blending and self._next is not None
+        # The track that is being blended in can't be put behind another.
+        if blending_in and ids and coming and ids[0] != coming[0]:
+            raise QueueChangeRefusedError(
+                "a transition is under way: the next track is fixed"
+            )
+        self._order = ids
+        decoded = self._next.track if self._next is not None else None
+        if (
+            not blending_in
+            and ids
+            and decoded is not None
+            and ids[0] != decoded.track_id
+        ):
+            self._restart_next()
+        self._save_playlist()
+
+    def queue_order(self, ids: list[str]) -> None:
+        """Put the tracks of the queue in the order of `ids`.
+
+        The tracks of the queue that are left out follow them, as the
+        radio chooses.
+        """
+        self._set_order(ids)
+
+    def queue_move(self, track_id: str, position: int) -> None:
+        """Move a track of the queue to a place in it (0 is the next)."""
+        ids = self._queue_ids()
+        if track_id not in ids:
+            raise UnknownQueueTrackError(track_id)
+        ids.remove(track_id)
+        ids.insert(max(0, min(position, len(ids))), track_id)
+        self._set_order(ids)
+
+    def queue_remove(self, track_id: str) -> None:
+        """Take a track out of the queue: it is not played, nor loaded again."""
+        if track_id not in self._queue_ids():
+            raise UnknownQueueTrackError(track_id)
+        if self._locked(track_id):
+            raise QueueChangeRefusedError(
+                "a transition is under way: the next track is fixed"
+            )
+        decoded = self._next.track if self._next is not None else None
+        if decoded is not None and decoded.track_id == track_id:
+            self._restart_next()
+        removed = next(
+            c
+            for c in self._pool
+            if c.track is not None and c.track.track_id == track_id
+        )
+        self._pool.remove(removed)
+        removed.path.unlink(missing_ok=True)
+        if self._cache is not None and removed.track is not None:
+            # Not offered again after a restart either.
+            self._cache.mark_played(removed.track.track_id, removed.track.codec)
+        self._order = [i for i in self._order if i != track_id]
+        self._save_playlist()
+        self._consumed.set()
+        log.info("Out of the queue: %s", removed.title)
+
+    def queue_play(self, track_id: str) -> None:
+        """Play a track of the queue next, as soon as a blend can start."""
+        ids = self._queue_ids()
+        if track_id not in ids:
+            raise UnknownQueueTrackError(track_id)
+        # Refused before anything is changed if a blend is under way.
+        self.request_skip()
+        ids.remove(track_id)
+        self._set_order([track_id, *ids])
 
     def _wanted(self, candidate: Candidate) -> bool:
         """Say whether the mood and the genre of a pool track are allowed."""
@@ -1022,11 +1157,29 @@ class Radio:
                     self._next.analysis,
                     self._next.track,
                     self._next.mood,
+                    pinned=self._is_pinned(self._next.track),
                 )
             )
         pool = [c for c in self._pool if self._wanted(c)]
         history = tuple(self._history)
         position = self._position
+        # What was put in place by hand comes in that order.
+        for candidate in self._pinned(pool):
+            if len(found) >= limit:
+                break
+            pool.remove(candidate)
+            found.append(
+                TrackInfo.of(
+                    candidate.title,
+                    candidate.analysis,
+                    candidate.track,
+                    candidate.mood,
+                    pinned=True,
+                )
+            )
+            history = (*history, candidate.artists)[-dj_mix.REPEAT_WINDOW :]
+            position += 1
+            current = candidate.analysis
         while len(found) < limit and pool:
             entries = [
                 dj_mix.Entry(c.analysis, c.artists, c.mood) for c in pool
@@ -1259,6 +1412,10 @@ class Radio:
                 return await self._replay_oldest()
             if not self._pool:
                 continue
+            if pinned := self._pinned(self._pool):
+                # Put in place by hand: no need to find what fits.
+                candidate = pinned[0]
+                break
             candidate, cost = self._choose(current)
             if cost <= dj_mix.SUITABLE_COST or extra >= MAX_EXTRA_TRACKS:
                 break
@@ -1452,6 +1609,8 @@ class Radio:
         if deck.source is not None:
             deck.source.path.unlink(missing_ok=True)
             deck.source = None
+        if deck.track is not None and deck.track.track_id in self._order:
+            self._order.remove(deck.track.track_id)
         if self._next is deck:
             self._next = None
             self._save_playlist()
@@ -1753,6 +1912,21 @@ async def _ready_deck(
     return following
 
 
+def _fresh(radio: DeckSource, current: Deck, task: Task[Deck]) -> Task[Deck]:
+    """Choose the next deck anew at once if the queue was changed.
+
+    A deck that was chosen before the change would wait to be found stale
+    until the track is nearly over; a track asked for would wait with it.
+    """
+    stale = (
+        task.done()
+        and not task.cancelled()
+        and task.exception() is None
+        and radio.is_stale(task.result())
+    )
+    return create_task(radio.next_deck(current.analysis)) if stale else task
+
+
 async def mix(radio: DeckSource, effects: float = 0.0) -> AsyncIterator[Piece]:
     """Produce the endless mix: PCM pieces and the title of each."""
     current = await radio.next_deck(None)
@@ -1772,6 +1946,7 @@ async def mix(radio: DeckSource, effects: float = 0.0) -> AsyncIterator[Piece]:
             for piece in _pieces(current.pcm[position:solo_end], current.title):
                 yield piece
                 position += len(piece[0])
+                following_task = _fresh(radio, current, following_task)
                 if radio.skip_requested:
                     early = _early_plan(
                         radio, current, following_task, position
@@ -2213,6 +2388,29 @@ def _parse_moods(body: object) -> list[str]:
     return moods
 
 
+def _parse_track_id(body: object) -> str:
+    track_id = body.get("track_id") if isinstance(body, dict) else None
+    if not isinstance(track_id, str) or not track_id:
+        raise web.HTTPBadRequest(text='expected {"track_id": "..."}')
+    return track_id
+
+
+def _parse_track_ids(body: object) -> list[str]:
+    ids = body.get("track_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise web.HTTPBadRequest(text='expected {"track_ids": [...]}')
+    return ids
+
+
+def _parse_move(body: object) -> tuple[str, int]:
+    position = body.get("position") if isinstance(body, dict) else None
+    if not isinstance(position, int) or isinstance(position, bool):
+        raise web.HTTPBadRequest(
+            text='expected {"track_id": "...", "position": 0}'
+        )
+    return _parse_track_id(body), position
+
+
 def _parse_language(body: object) -> str:
     language = body.get("language") if isinstance(body, dict) else None
     if language not in LANGUAGES:
@@ -2354,6 +2552,42 @@ def _add_queue_api(app: web.Application, radio: Radio) -> None:
     app.router.add_post("/api/next", next_track)
 
 
+def _add_queue_edit_api(app: web.Application, radio: Radio) -> None:
+    """Add the endpoints that change the queue by hand."""
+
+    def changing(change: Callable[[], None]) -> web.Response:
+        try:
+            change()
+        except UnknownQueueTrackError as err:
+            raise web.HTTPNotFound(text=f"not in the queue: {err}") from None
+        except (QueueChangeRefusedError, SkipRefusedError) as err:
+            raise web.HTTPConflict(text=str(err)) from None
+        return web.json_response(radio.queue())
+
+    async def put_order(request: web.Request) -> web.Response:
+        ids = _parse_track_ids(await _json_body(request))
+        return changing(lambda: radio.queue_order(ids))
+
+    async def move_track(request: web.Request) -> web.Response:
+        track_id, position = _parse_move(await _json_body(request))
+        return changing(lambda: radio.queue_move(track_id, position))
+
+    async def remove_track(request: web.Request) -> web.Response:
+        track_id = request.match_info["track_id"]
+        return changing(lambda: radio.queue_remove(track_id))
+
+    async def play_track(request: web.Request) -> web.Response:
+        track_id = _parse_track_id(await _json_body(request))
+        response = changing(lambda: radio.queue_play(track_id))
+        response.set_status(202)  # the blend starts on a good beat
+        return response
+
+    app.router.add_put("/api/queue/order", put_order)
+    app.router.add_post("/api/queue/move", move_track)
+    app.router.add_delete("/api/queue/tracks/{track_id}", remove_track)
+    app.router.add_post("/api/queue/play", play_track)
+
+
 def _auth_info(
     radio: Radio, backends: MultiBackend | None
 ) -> dict[str, object]:
@@ -2465,6 +2699,7 @@ def add_api(
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
     _add_queue_api(app, radio)
+    _add_queue_edit_api(app, radio)
     _add_language_api(app, radio)
     _add_genres_api(app, radio)
     _add_stats_api(app, radio)

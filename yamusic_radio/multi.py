@@ -16,7 +16,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from yamusic_radio.backend import AuthError, AuthPrompt, BackendError
+from yamusic_radio.backend import (
+    AuthError,
+    AuthPrompt,
+    BackendError,
+    Configurable,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -132,10 +137,18 @@ class MultiBackend:
                 "url": None,
                 "code": None,
                 "fields": [],
+                "settings": {},
+                "setting_fields": [],
             }
             if running is not None:
                 authorized = running.backend.authorized
                 prompt = running.backend.auth_prompt
+                if isinstance(running.backend, Configurable):
+                    info["settings"] = running.backend.settings
+                    info["setting_fields"] = [
+                        dataclasses.asdict(f)
+                        for f in running.backend.setting_fields
+                    ]
                 info["authorized"] = authorized
                 info["available"] = authorized and now >= running.rest_until
                 if not authorized:
@@ -278,7 +291,10 @@ class MultiBackend:
         for running in self._usable():
             try:
                 batch = await running.backend.station_batch(
-                    running.station, exclude_track_ids=exclude_track_ids
+                    running.station,
+                    exclude_track_ids=self._known_to(
+                        running, exclude_track_ids
+                    ),
                 )
             except BackendError as err:
                 self._failed(running, err)
@@ -288,6 +304,14 @@ class MultiBackend:
             self._last = running.spec.id
             return [self._stamp(running, track) for track in batch]
         raise RuntimeError("no music backend can give tracks") from last_error
+
+    @staticmethod
+    def _known_to(running: _Running, track_ids: set[str]) -> set[str]:
+        """Give a backend the ids it knows: its own, without the stamp."""
+        if running.spec.plain_ids:
+            return track_ids
+        stamp = f"{running.spec.id}:"
+        return {i.removeprefix(stamp) for i in track_ids if i.startswith(stamp)}
 
     @staticmethod
     def _stamp(running: _Running, track: Track) -> Track:

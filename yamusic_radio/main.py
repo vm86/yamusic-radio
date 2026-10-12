@@ -14,6 +14,7 @@ from aiohttp import ClientSession, ClientTimeout
 
 from yamusic_radio import dj
 from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
+from yamusic_radio.local import LocalBackend
 from yamusic_radio.multi import BackendSpec, MultiBackend
 from yamusic_radio.ya_player import YandexMusicPlayer, has_token
 
@@ -23,11 +24,13 @@ log = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path.home() / ".config/yamusic-radio.json"
 DEFAULT_LOG = Path.home() / ".cache/yamusic_radio.log"
 # The ids of backend_specs(), for the command line.
-BACKEND_IDS = ("yandex",)
+BACKEND_IDS = ("yandex", "local")
 # The cache setting that keeps the backends turned on (the older one,
 # "backend", kept just the one).
 SETTING_BACKENDS = "backends"
 SETTING_BACKEND = "backend"
+# The folder of the local backend.
+SETTING_LOCAL_DIRECTORY = "local_directory"
 
 
 def init_logging(*, debug: bool, systemd_run: bool) -> None:
@@ -97,6 +100,15 @@ def parse_args() -> Namespace:
             "all that are on are mixed. The ones of the last run and the "
             "ones that are signed in are on too; the page turns them on "
             "and off"
+        ),
+    )
+    parser.add_argument(
+        "--local-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Folder with audio files for the local backend; it is turned on "
+            "and the folder kept in the settings (the page can change it)"
         ),
     )
     parser.add_argument(
@@ -183,20 +195,45 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
+def _saved_directory(cache: TrackCache | None) -> Path | None:
+    """Return the folder of the local backend that the settings keep."""
+    saved = (
+        None if cache is None else cache.get_setting(SETTING_LOCAL_DIRECTORY)
+    )
+    return Path(saved) if isinstance(saved, str) and saved else None
+
+
 def backend_specs(
-    options: Namespace, session: ClientSession
+    options: Namespace,
+    session: ClientSession,
+    cache: TrackCache | None = None,
 ) -> list[BackendSpec]:
     """List the music services the radio can take its tracks from.
 
-    The one place to change to play from another service or from a local
-    collection: add a `BackendSpec` that makes any `MusicBackend`.
+    The one place to change to play from another service: add a
+    `BackendSpec` that makes any `MusicBackend`.
     """
+    chosen: Path | None = options.local_dir
+    directory = chosen.expanduser() if chosen else _saved_directory(cache)
     return [
         BackendSpec(
             "yandex",
             "Yandex Music",
             lambda: YandexMusicPlayer(options.config, session),
             lambda: has_token(options.config),
+        ),
+        BackendSpec(
+            "local",
+            "Local folder",
+            lambda: LocalBackend(
+                directory,
+                None
+                if cache is None
+                else lambda chosen: cache.put_setting(
+                    SETTING_LOCAL_DIRECTORY, chosen
+                ),
+            ),
+            lambda: directory is not None and directory.is_dir(),
         ),
     ]
 
@@ -239,10 +276,16 @@ async def _run(options: Namespace, socket_notify: socket.socket | None) -> None:
     )
     cache = None if options.no_cache else TrackCache(options.cache)
     # What the last run was using, unless the command line says otherwise.
-    specs = backend_specs(options, session)
+    if cache is not None and options.local_dir is not None:
+        cache.put_setting(SETTING_LOCAL_DIRECTORY, str(options.local_dir))
+    specs = backend_specs(options, session, cache)
     backend = MultiBackend(
         specs,
-        enabled=[*(options.backend or ()), *_last_backends(cache)],
+        enabled=[
+            *(options.backend or ()),
+            *(["local"] if options.local_dir is not None else []),
+            *_last_backends(cache),
+        ],
         stations=_stations(options.station, specs[0].id),
         on_change=(
             None

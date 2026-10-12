@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,6 +86,25 @@ class Track:
     # backend knows it by when that is not `track_id`.
     source: str = ""
     native_id: str = ""
+
+
+@runtime_checkable
+class Configurable(Protocol):
+    """A backend with settings the page can show and change.
+
+    The new values are given to `authorize`, which is for signing in and for
+    this alike; the backend keeps them where settings are kept.
+    """
+
+    @property
+    def settings(self) -> dict[str, str]:
+        """The values the settings have now."""
+        ...
+
+    @property
+    def setting_fields(self) -> tuple[AuthField, ...]:
+        """What the settings are called, and whether they are secret."""
+        ...
 
 
 class MusicBackend(Protocol):

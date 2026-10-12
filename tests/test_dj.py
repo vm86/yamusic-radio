@@ -679,6 +679,8 @@ class FakeBackend:
     def __init__(self, batches: list[list[Track]]) -> None:
         self.batches = batches
         self.mood: str | None = None
+        # The language the account has the station set to.
+        self.language = "any"
         self.fail: Exception | None = None
         self.downloaded: list[str] = []
         self.requests = 0
@@ -710,7 +712,7 @@ class FakeBackend:
     async def station_settings(
         self, _station_id: str, /
     ) -> tuple[str, str, str]:
-        return "all", "default", "any"
+        return "all", "default", self.language
 
     async def set_station_settings(
         self,
@@ -722,6 +724,7 @@ class FakeBackend:
     ) -> None:
         self.settings.append((mood, diversity, language))
         self.mood = mood
+        self.language = language
 
     async def download(self, track: Track, path: Path) -> None:
         if self.fail is not None:
@@ -3861,3 +3864,161 @@ async def test_the_mix_is_encoded_for_both_streams(
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_the_language_is_set_on_the_station_and_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcd"]])
+    backend.language = "russian"  # what the account has
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    assert radio.language_info() == {
+        "available": ["any", "russian", "not-russian", "without-words"],
+        "selected": None,
+        "station": "",
+        "steered": True,
+    }
+
+    await radio.set_language("not-russian")
+
+    assert backend.settings == [("all", "default", "not-russian")]
+    info = radio.language_info()
+    assert (info["selected"], info["station"]) == ("not-russian", "not-russian")
+
+    await radio.restore_settings()  # the radio stops
+
+    assert backend.settings[-1] == ("all", "default", "russian")
+    with pytest.raises(ValueError, match="unknown language"):
+        await radio.set_language("klingon")
+
+
+@pytest.mark.asyncio
+async def test_the_account_is_given_back_when_nothing_steers_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcd"]])
+    backend.language = "russian"
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    await radio.set_allowed_moods(["calm"])
+    await radio.set_language("without-words")
+
+    def steering() -> bool:
+        return radio.mood_arc_saved is not None
+
+    await radio.set_allowed_moods([])  # the language still steers it
+    assert steering()
+    assert backend.language == "without-words"
+
+    await radio.set_language(None)  # nothing does: all is as it was
+    assert not steering()
+    assert backend.settings[-1] == ("all", "default", "russian")
+    assert backend.mood == "all"
+    assert radio.language_info()["selected"] is None
+    await radio.set_language(None)  # nothing to do, and nothing happens
+    assert backend.language == "russian"
+
+
+@pytest.mark.asyncio
+async def test_a_mood_change_keeps_the_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcdef"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    await radio.set_language("russian")
+
+    await radio.set_allowed_moods(["fun"])
+    await radio.fill(3)
+
+    assert backend.language == "russian"
+    assert backend.settings[-1][2] == "russian"
+    assert {lang for _, _, lang in backend.settings} == {"russian"}
+
+
+@pytest.mark.asyncio
+async def test_a_new_language_gives_up_the_loaded_tracks_but_a_few(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcdef"]])
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    await radio.fill(6)
+    kept = [c.title for c in radio.pool[: dj.LANGUAGE_KEEP_TRACKS]]
+    dropped = [c.path for c in radio.pool[dj.LANGUAGE_KEEP_TRACKS :]]
+    assert len(dropped) == 4
+
+    await radio.set_language("russian")
+
+    assert [c.title for c in radio.pool] == kept
+    assert not any(path.exists() for path in dropped)
+    # The same language again: the account is not asked, nothing is given up.
+    radio.pool.append(dataclasses.replace(radio.pool[0]))
+    asked = len(backend.settings)
+    await radio.set_language("russian")
+    assert len(backend.settings) == asked
+    assert len(radio.pool) == dj.LANGUAGE_KEEP_TRACKS + 1
+
+
+@pytest.mark.asyncio
+async def test_the_language_comes_back_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, track_cache: TrackCache
+) -> None:
+    first, backend = persistent_radio(tmp_path, monkeypatch, track_cache)
+    backend.language = "russian"
+    await first.set_language("not-russian")
+    # The process is killed: the account keeps the language it was given.
+    assert track_cache.get_setting("language") == "not-russian"
+    assert track_cache.get_setting("station_settings") is not None
+
+    again, backend2 = persistent_radio(tmp_path, monkeypatch, track_cache)
+    backend2.language = "not-russian"  # what the killed run left
+    await again.restore_state()
+
+    # What was left is put back first, then the pick is made again.
+    assert backend2.settings == [
+        ("all", "default", "russian"),
+        ("all", "default", "not-russian"),
+    ]
+    assert again.language_info()["selected"] == "not-russian"
+
+    await again.restore_settings()  # a clean stop this time
+    assert backend2.language == "russian"
+
+
+@pytest.mark.asyncio
+async def test_language_in_the_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = FakeBackend([[make_track(n) for n in "abcd"]])
+    backend.authorized = True
+    radio = make_radio(tmp_path, monkeypatch, backend, {})
+    app = dj.make_app(dj.Broadcaster(), radio)
+
+    async with TestClient(TestServer(app)) as client:
+        info = await (await client.get("/api/language")).json()
+        assert info["selected"] is None
+        assert "russian" in info["available"]
+
+        reply = await client.put("/api/language", json={"language": "russian"})
+        assert reply.status == 200
+        assert (await reply.json())["selected"] == "russian"
+        queue = await (await client.get("/api/queue")).json()
+        assert queue["language"]["selected"] == "russian"
+
+        bodies: list[object] = [{"language": "klingon"}, {}, []]
+        for body in bodies:
+            assert (await client.put("/api/language", json=body)).status == 400
+        assert (await client.put("/api/language", data="nope")).status == 400
+
+        reply = await client.delete("/api/language")
+        assert (await reply.json())["selected"] is None
+        assert backend.language == "any"
+
+        backend.authorized = False
+        assert (
+            await client.put("/api/language", json={"language": "russian"})
+        ).status == 503
+        backend.authorized = True
+        backend.supports_moods = False
+        assert (
+            await client.put("/api/language", json={"language": "russian"})
+        ).status == 409

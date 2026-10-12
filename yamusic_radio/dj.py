@@ -104,6 +104,12 @@ SETTING_MOODS = "moods"
 SETTING_GENRES = "genres"
 SETTING_BLOCKED = "blocked_genres"
 SETTING_STATION = "station_settings"
+SETTING_LANGUAGE = "language"
+# The languages of the music a station can be set to (Yandex's own names).
+LANGUAGES = ("any", "russian", "not-russian", "without-words")
+# When the language is changed, the tracks loaded for the old one are kept
+# only as far as they are needed for the next blends.
+LANGUAGE_KEEP_TRACKS = 2
 # The genres of My Wave known so far: offered while the cache has none yet.
 KNOWN_GENRES = (
     "dance", "pop", "house", "electronics", "rock", "country", "alternative",
@@ -368,6 +374,10 @@ class Radio:
         # Tracks turned down for their mood, counted by the loading.
         self._off_mood = 0
         self._mood = ""
+        # The language setting the station has now ("" before the settings
+        # are put aside) and the one picked here, None for the account's own.
+        self._language = ""
+        self._picked_language: str | None = None
         self._saved_settings: tuple[str, str, str] | None = None
         self._playing_id = ""
         # What the API shows: the track heard now, the ones before it and
@@ -450,6 +460,7 @@ class Radio:
             self.station_id
         )
         self._mood = self._saved_settings[0]
+        self._language = self._saved_settings[2]
         self._remember(
             SETTING_STATION,
             {"station": self.station_id, "settings": self._saved_settings},
@@ -459,11 +470,15 @@ class Radio:
         """Put the station's settings back as they were."""
         if self._saved_settings is None:
             return
-        if self._mood != self._saved_settings[0]:
+        if (self._mood, self._language) != (
+            self._saved_settings[0],
+            self._saved_settings[2],
+        ):
             await self._backend.set_station_settings(
                 self.station_id, *self._saved_settings
             )
             self._mood = self._saved_settings[0]
+            self._language = self._saved_settings[2]
         self._forget(SETTING_STATION)
 
     async def restore_state(self) -> None:
@@ -506,6 +521,9 @@ class Radio:
         moods = self._cache.get_setting(SETTING_MOODS)
         if isinstance(moods, list) and moods:
             await self.set_allowed_moods(m for m in moods if isinstance(m, str))
+        language = self._cache.get_setting(SETTING_LANGUAGE)
+        if isinstance(language, str) and language in LANGUAGES:
+            await self.set_language(language)
 
     @property
     def authorized(self) -> bool:
@@ -559,13 +577,70 @@ class Radio:
             await self.start_mood_arc()
         self._allowed_moods = wanted
         self._remember(SETTING_MOODS, list(wanted))
-        if not wanted and not self._mood_arc:
-            await self.restore_settings()
-            self._saved_settings = None
+        await self._release_settings()
         self._drop_unwanted()
         log.info("Moods played: %s", ", ".join(wanted) or "any")
         # Wake up the refill: the pool may be short of tracks now.
         self._consumed.set()
+
+    async def _release_settings(self) -> None:
+        """Put the station's settings back once nothing here steers them."""
+        if (
+            self._saved_settings is not None
+            and not self._allowed_moods
+            and not self._mood_arc
+            and self._picked_language is None
+        ):
+            await self.restore_settings()
+            self._saved_settings = None
+
+    async def set_language(self, language: str | None) -> None:
+        """Play music of a language, or the account's own with None.
+
+        Like the moods, it is a setting of the station, kept on the account:
+        it is changed for as long as the radio runs and put back when it
+        stops. The tracks loaded already are not of a known language, so
+        most of them are given up (the ones needed next stay) and the
+        station is asked for tracks anew.
+        """
+        if language is not None and language not in LANGUAGES:
+            raise ValueError(f"unknown language {language!r}")
+        if language is not None and self._saved_settings is None:
+            await self.start_mood_arc()
+        if self._saved_settings is None:
+            return  # nothing was changed: nothing to put back
+        target = self._saved_settings[2] if language is None else language
+        if target != self._language:
+            _, diversity, _ = self._saved_settings
+            await self._backend.set_station_settings(
+                self.station_id, self._mood, diversity, target
+            )
+            self._language = target
+            self._give_up_the_pool()
+        self._picked_language = language
+        if language is None:
+            self._forget(SETTING_LANGUAGE)
+        else:
+            self._remember(SETTING_LANGUAGE, language)
+        await self._release_settings()
+        log.info("Language of the music: %s", language or "the account's own")
+
+    def _give_up_the_pool(self) -> None:
+        """Drop the loaded tracks but the few that are needed next."""
+        for candidate in self._pool[LANGUAGE_KEEP_TRACKS:]:
+            candidate.path.unlink(missing_ok=True)
+        del self._pool[LANGUAGE_KEEP_TRACKS:]
+        # Wake up the refill: the pool is short of tracks now.
+        self._consumed.set()
+
+    def language_info(self) -> dict[str, object]:
+        return {
+            "available": list(LANGUAGES),
+            "selected": self._picked_language,
+            "station": self._language,
+            # Whether the backend can change its station's language.
+            "steered": self._backend.supports_moods,
+        }
 
     @property
     def generation(self) -> int:
@@ -699,6 +774,7 @@ class Radio:
             ),
             "next": [t.to_dict() for t in self.upcoming(after)],
             "moods": self.moods_info(),
+            "language": self.language_info(),
             **self.skip_info(),
             **self.pause_info(),
         }
@@ -844,9 +920,9 @@ class Radio:
     async def _set_mood(self, mood: str) -> None:
         if self._saved_settings is None or mood == self._mood:
             return
-        _, diversity, language = self._saved_settings
+        _, diversity, _ = self._saved_settings
         await self._backend.set_station_settings(
-            self.station_id, mood, diversity, language
+            self.station_id, mood, diversity, self._language
         )
         self._mood = mood
 
@@ -1903,6 +1979,15 @@ def _parse_moods(body: object) -> list[str]:
     return moods
 
 
+def _parse_language(body: object) -> str:
+    language = body.get("language") if isinstance(body, dict) else None
+    if language not in LANGUAGES:
+        raise web.HTTPBadRequest(
+            text=f'expected {{"language": one of {list(LANGUAGES)}}}'
+        )
+    return str(language)
+
+
 def _key_pair(now: str, then: str, number: int) -> dict[str, object]:
     """Describe one change of key; a key that was not found is null."""
     relation = dj_mix.key_relation(
@@ -1924,6 +2009,34 @@ def parse_genres(body: object) -> list[str]:
     ):
         raise web.HTTPBadRequest(text='expected {"genres": [...]}')
     return genres
+
+
+def _add_language_api(app: web.Application, radio: Radio) -> None:
+    """Add the endpoints of the language of the music (a station setting)."""
+
+    def steerable() -> None:
+        # The language is a setting of the account at the backend.
+        if not radio.authorized:
+            raise web.HTTPServiceUnavailable(text="not authorized yet")
+        if not radio.language_info()["steered"]:
+            raise web.HTTPConflict(text="the backend can't change the language")
+
+    async def get_language(_: web.Request) -> web.Response:
+        return web.json_response(radio.language_info())
+
+    async def put_language(request: web.Request) -> web.Response:
+        steerable()
+        await radio.set_language(_parse_language(await _json_body(request)))
+        return web.json_response(radio.language_info())
+
+    async def delete_language(_: web.Request) -> web.Response:
+        steerable()
+        await radio.set_language(None)
+        return web.json_response(radio.language_info())
+
+    app.router.add_get("/api/language", get_language)
+    app.router.add_put("/api/language", put_language)
+    app.router.add_delete("/api/language", delete_language)
 
 
 def _add_genres_api(app: web.Application, radio: Radio) -> None:
@@ -2118,6 +2231,7 @@ def add_api(
     app.router.add_put("/api/moods", put_moods)
     app.router.add_delete("/api/moods", delete_moods)
     _add_queue_api(app, radio)
+    _add_language_api(app, radio)
     _add_genres_api(app, radio)
     _add_stats_api(app, radio)
 

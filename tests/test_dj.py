@@ -4701,3 +4701,141 @@ async def test_a_deck_given_up_near_the_blend_is_changed_for_another() -> None:
     assert ("started", "two") not in radio.events
     played = np.concatenate([pcm for pcm, _ in pieces])
     assert np.isfinite(played).all()
+
+
+async def radio_of_two_backends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dj.Radio, MultiBackend, dict[str, FakeBackend], list[Path]]:
+    """Make a radio that has "a", "b" downloaded and "c", "d" only linked."""
+    made: dict[str, FakeBackend] = {}
+    multi = MultiBackend(
+        specs(
+            made,
+            [[make_track("a"), make_track("b")]],
+            [[make_track("c"), make_track("d")]],
+            configured=("one", "two"),
+        )
+    )
+    radio = make_radio(tmp_path, monkeypatch, multi, {})
+    await radio.fill(4)
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    linked = []
+    for candidate in radio.pool:
+        if candidate.track is not None and candidate.track.source == "two":
+            original = storage / candidate.path.name
+            original.write_bytes(b"x")
+            candidate.path.unlink()
+            candidate.path.symlink_to(original)
+            linked.append(original)
+    assert len(linked) == 2
+    return radio, multi, made, linked
+
+
+def links_in(directory: Path) -> list[str]:
+    return [p.name for p in directory.iterdir() if p.is_symlink()]
+
+
+def queue_titles(radio: dj.Radio) -> list[str]:
+    queue = cast("dict[str, Any]", radio.queue())
+    return sorted(t["title"] for t in queue["next"])
+
+
+@pytest.mark.asyncio
+async def test_a_backend_turned_off_takes_its_linked_tracks_from_the_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, linked = await radio_of_two_backends(tmp_path, monkeypatch)
+    assert queue_titles(radio) == ["a", "b", "c", "d"]
+
+    await multi.disable("two")
+    # At once in what the API shows, and then really, with the links.
+    assert queue_titles(radio) == ["a", "b"]
+    radio.backends_changed()
+
+    assert sorted(c.title for c in radio.pool) == ["a", "b"]
+    assert not any(
+        c.path.is_symlink() for c in radio.pool
+    )  # the downloaded ones stay, and are files of their own
+    assert all(path.exists() for path in linked)  # the originals are safe
+    assert links_in(tmp_path) == []  # the links are gone
+
+
+@pytest.mark.asyncio
+async def test_the_tracks_of_a_backend_come_back_to_be_offered_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+    seen = {c.track.track_id for c in radio.pool if c.track is not None}
+    assert {"two:c", "two:d"} <= seen
+
+    await multi.disable("two")
+    radio.backends_changed()
+
+    left = {i for i in ("two:c", "two:d") if i in radio._seen}  # noqa: SLF001
+    assert left == set()  # not heard: they may be offered when it is back
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_backend_loses_its_linked_tracks_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, made, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+
+    made["two"].authorized = False  # the folder is not there any more
+    assert queue_titles(radio) == ["a", "b"]
+    made["two"].authorized = True
+    assert queue_titles(radio) == ["a", "b", "c", "d"]  # and back again
+
+    # Resting after failures is the same.
+    running = multi._running["two"]  # noqa: SLF001
+    multi._failed(running, RuntimeError("down"))  # noqa: SLF001
+    multi._failed(running, RuntimeError("down"))  # noqa: SLF001
+    assert queue_titles(radio) == ["a", "b"]
+    radio.backends_changed()
+    assert sorted(c.title for c in radio.pool) == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_a_link_to_what_is_gone_is_given_up_whatever_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, _, _, linked = await radio_of_two_backends(tmp_path, monkeypatch)
+
+    linked[0].unlink()  # the file was removed from the folder
+
+    assert len(queue_titles(radio)) == 3
+    radio.backends_changed()
+    assert len(radio.pool) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_decoded_next_track_plays_even_if_its_backend_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+    now = await radio.next_deck(None)
+    radio.started(now)
+    decoded = await radio.next_deck(now.analysis)  # in memory
+
+    await multi.disable("two")
+    radio.backends_changed()
+
+    assert not radio.is_stale(decoded)
+    assert next_ids(radio)[0] == decoded.track.track_id  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_turning_a_backend_off_in_the_api_clears_its_tracks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radio, multi, _, _ = await radio_of_two_backends(tmp_path, monkeypatch)
+    app = dj.make_app(dj.Broadcaster(), radio, multi)
+
+    async with TestClient(TestServer(app)) as client:
+        reply = await client.delete("/api/auth/backend/two")
+        assert reply.status == 200
+
+        queue = await (await client.get("/api/queue")).json()
+        assert sorted(t["title"] for t in queue["next"]) == ["a", "b"]
+    assert sorted(c.title for c in radio.pool) == ["a", "b"]

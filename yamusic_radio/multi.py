@@ -160,6 +160,21 @@ class MultiBackend:
             result.append(info)
         return result
 
+    def unavailable(self) -> set[str]:
+        """List the backends that can't give tracks now.
+
+        They are off, not signed in (a folder that is not there, say), or
+        resting after failures.
+        """
+        now = self._clock()
+        gone = {i for i in self._specs if i not in self._running}
+        gone |= {
+            r.spec.id
+            for r in self._running.values()
+            if not r.backend.authorized or now < r.rest_until
+        }
+        return gone
+
     # Which backends can give tracks, and the failures that take them out.
 
     def _usable(self) -> list[_Running]:

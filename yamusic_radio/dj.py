@@ -962,10 +962,33 @@ class Radio:
         self._set_order([track_id, *ids])
 
     def _wanted(self, candidate: Candidate) -> bool:
-        """Say whether the mood and the genre of a pool track are allowed."""
-        return self._mood_allowed(candidate.mood) and self._genre_allowed(
-            candidate.genre
+        """Say whether a pool track may be played.
+
+        Its mood and genre are allowed, and its audio is there to be read.
+        """
+        return (
+            self._mood_allowed(candidate.mood)
+            and self._genre_allowed(candidate.genre)
+            and self._reachable(candidate)
         )
+
+    def _reachable(self, candidate: Candidate) -> bool:
+        """Say whether the audio of a pool track can still be read.
+
+        A track that was downloaded is a file of its own. One that is only
+        linked (a folder's) stays in its backend's storage, so it goes
+        with the backend when that is turned off or can't be reached.
+        """
+        if not candidate.path.exists():
+            return False  # gone, or a link to what is gone
+        track = candidate.track
+        if track is None or not candidate.path.is_symlink():
+            return True
+        backend = self._backend
+        gone = (
+            backend.unavailable() if isinstance(backend, MultiBackend) else ()
+        )
+        return track.source not in gone
 
     def _mood_allowed(self, mood: str) -> bool:
         return not self._allowed_moods or mood in self._allowed_moods
@@ -976,12 +999,20 @@ class Radio:
         return not self._allowed_genres or genre in self._allowed_genres
 
     def _drop_unwanted(self) -> None:
-        """Forget the pool tracks of other moods or genres."""
+        """Forget the pool tracks of other moods or genres, or out of reach."""
         for candidate in list(self._pool):
             if not self._wanted(candidate):
                 self._pool.remove(candidate)
                 candidate.path.unlink(missing_ok=True)
+                if not self._reachable(candidate) and candidate.track:
+                    # Not heard: it may be offered again when it is back.
+                    self._seen.discard(candidate.track.track_id)
                 self._save_playlist()
+
+    def backends_changed(self) -> None:
+        """Let go of the tracks of a backend that went, and look for more."""
+        self._drop_unwanted()
+        self._consumed.set()
 
     def set_wanted_genres(self, genres: Iterable[str]) -> None:
         """Pick the genres. The queue follows them once it is rebuilt."""
@@ -1299,6 +1330,7 @@ class Radio:
         """Background task: top the pool up whenever tracks are taken."""
         while True:
             self._consumed.clear()
+            self._drop_unwanted()
             try:
                 await self.fill()
             except CancelledError:
@@ -2657,6 +2689,7 @@ def _add_backend_api(
             await known().disable(request.match_info["backend"])
         except ValueError as err:
             raise web.HTTPNotFound(text=str(err)) from err
+        radio.backends_changed()
         return web.json_response(_auth_info(radio, backends))
 
     app.router.add_put("/api/auth/backend", turn_on)

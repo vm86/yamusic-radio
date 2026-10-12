@@ -14,7 +14,7 @@ Needs Python >= 3.12 and `ffmpeg` with libmp3lame in `PATH`.
 python -m venv .venv && .venv/bin/pip install -e ".[test,lint]"
 .venv/bin/yamusic-dj --wait --port 8000 --backend yandex
 .venv/bin/yamusic-dj --mood-arc --effects full --host 0.0.0.0
-# listen: http://127.0.0.1:8000/stream (MP3) or /stream.flac (lossless)
+# listen: http://127.0.0.1:8000/stream (MP3), /stream.flac or /stream.ogg (lossless)
 ```
 
 **Music backends.** The tracks come from the backends that are on; with
@@ -40,6 +40,13 @@ tracks or analyze known ones again. The genre of the track (from its album) is
 kept in the same table; the API does not show it. `--cache PATH` moves it, `--no-cache`
 turns it off.
 
+The tracks that are loaded and wait for their turn are kept in
+`~/.cache/yamusic-radio-tracks/` (`<cache name>-tracks`, next to the cache;
+`--tracks-dir PATH` moves it, `--no-keep-tracks` turns it off, and so does
+`--no-cache`), so a restart plays them instead of loading them again. A pool of
+lossless tracks takes some hundreds of MB. The Docker image keeps them in
+`/data/tracks`.
+
 The moods, the genres and the backends that were picked are kept in the cache
 and picked again at the next start (not with `--no-cache`). A backend that
 steers its station by the mood (Yandex does) has the mood setting of the
@@ -50,13 +57,14 @@ radio finds the mood of each track by its sound (energy and key).
 
 ## Streams
 
-Both streams carry the same mix and are always on (the radio runs two
-encoders, one `ffmpeg` for each):
+The streams carry the same mix and are always on (the radio runs an
+`ffmpeg` encoder for each):
 
 | URL | Format | Notes |
 |---|---|---|
 | `/stream` | MP3, 320 kbit/s (`MP3_BITRATE` in `dj.py`; `libmp3lame`) | With ICY titles (`Icy-MetaData: 1`). Plays in any player. |
 | `/stream.flac` | FLAC, lossless, 16 bit | The mix is dithered to 16 bit (triangular dither, as for a CD). No titles: the stream carries no tags. About 110 kB a second, so mind the network. |
+| `/stream.ogg` | The same FLAC in an Ogg container | For Safari and every browser on iOS: they play a live stream of FLAC in Ogg, not of bare FLAC. The page picks it by itself when the lossless stream is asked for there. No titles. |
 
 A new listener gets the latest 3 s of the stream at once (from a frame
 boundary; a FLAC listener gets the stream header first), so the player can
@@ -142,7 +150,7 @@ stay on neighbouring keys (a fifth of them would by chance).
 ## Web page
 
 `http://127.0.0.1:8000/` is a Material Design 3 page (works on a phone):
-play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the FLAC stream (remembered) and volume, the current track with its progress and, under the cover, the spectrum of the mix (12 bars, in time with the sound), the previous and
+play/pause (it stops and starts this page's own listening; the radio stands while nobody listens, and the page shows that it is paused, and stops itself when the stream goes away), a switch between the MP3 and the lossless stream (remembered; Safari and iOS get it as FLAC in Ogg), the language of the music (Yandex backend) and volume, the current track with its progress and, under the cover, the spectrum of the mix (12 bars, in time with the sound), the previous and
 the next tracks, mood chips, the genres (tabs *Play* and *Never play*), the
 transition statistics, and the backends: which are on, the sign-in of each
 (the code of a device flow, or the fields it asks for). The theme is light,
@@ -172,7 +180,7 @@ it hears the sound ~3 s late). So the radio sends the bands over
 them when its player gets there.
 
 To tie the two together, the page gives its connection a name: it opens the
-stream as `/stream?l=NAME` (or `/stream.flac?l=NAME`) and the spectrum as
+stream as `/stream?l=NAME` (or `/stream.flac?l=NAME`, `/stream.ogg?l=NAME`) and the spectrum as
 `/api/spectrum?l=NAME`. The radio notes where in the mix that stream starts
 (a new listener gets the latest 3 s at once) and sends it first as the `start`
 event. A page of another origin can do the same: both URLs are sent with
@@ -201,6 +209,9 @@ Served next to the stream, no authentication.
 | `POST /api/auth` `{"backend": "id", "values": {"login": "..."}}` | Sign in with the values of the `fields` of the backend (without `backend`, of the radio's own). Answers like `GET /api/auth`; 400 if the backend turns them down. |
 | `PUT /api/auth/backend` `{"backend": "id"}` | Turn the backend on; it starts signing in if it needs to. Answers like `GET /api/auth`; 400 for an unknown id. |
 | `DELETE /api/auth/backend/{id}` | Turn the backend off. The tracks it gave already stay in the pool. Answers like `GET /api/auth`; 404 for an unknown id. |
+| `GET /api/language` | The language of the music: `available` (`any`, `russian`, `not-russian`, `without-words`), `selected` (picked here, `null` if none), the `station` language now and `steered` (whether the backend can change it). The same object is `language` in `GET /api/queue`. |
+| `PUT /api/language` `{"language": "russian"}` | Play music of this language. A setting of the station on the account, like the moods: changed while the radio runs and put back on exit or `DELETE`, and remembered in the cache. The tracks loaded for the old language are given up but the two needed next, and the station is asked anew. 400 for an unknown language, 409 if the backend cannot change it, 503 before it is authorized. |
+| `DELETE /api/language` | The account's own language again. |
 | `GET /api/moods` | `available` (`sad`, `calm`, `fun`, `active`), `selected`, the `station` mood now and `steered` (whether the backends steer their stations by the mood; if not, the radio judges the tracks by their sound). |
 | `PUT /api/moods` `{"moods": ["calm", "fun"]}` | Play only these moods. |
 | `DELETE /api/moods` | Any mood again. |

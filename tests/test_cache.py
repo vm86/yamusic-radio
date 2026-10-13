@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import yamusic_radio.cache as cache_module
 from yamusic_radio.cache import MAX_ROWS, TrackCache
-from yamusic_radio.dj_mix import TrackAnalysis, key_detector
+from yamusic_radio.dj_mix import TrackAnalysis, key_detector, loudness_meter
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,6 +114,23 @@ def test_analysis_with_an_unknown_key_detector_is_analyzed_again(
 
     for key_by in (None, "something else"):
         stored["key_by"] = key_by
+        sql(cache_path, "UPDATE tracks SET analysis = ?", (json.dumps(stored),))
+        assert cache.get_analysis("1", "mp3") is None
+
+
+def test_analysis_measured_another_way_is_analyzed_again(
+    track_cache: TrackCache, cache_path: Path
+) -> None:
+    cache = track_cache
+    cache.put_analysis("1", "mp3", "A - B", ANALYSIS)
+    stored = json.loads(
+        str(sql(cache_path, "SELECT analysis FROM tracks")[0][0])
+    )
+    assert stored["loudness_by"] == loudness_meter()
+
+    # None is an analysis from before the loudness was measured by a meter.
+    for loudness_by in (None, "something else"):
+        stored["loudness_by"] = loudness_by
         sql(cache_path, "UPDATE tracks SET analysis = ?", (json.dumps(stored),))
         assert cache.get_analysis("1", "mp3") is None
 

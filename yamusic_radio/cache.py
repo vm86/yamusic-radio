@@ -17,6 +17,7 @@ from pathlib import Path
 from yamusic_radio.dj_mix import (
     TrackAnalysis,
     key_detector,
+    loudness_meter,
     quality_counts,
 )
 
@@ -143,6 +144,9 @@ class TrackCache:
                 # The key was not analyzed, or by something worse: analyze
                 # the track again.
                 return None
+            if fields.pop("loudness_by", None) != loudness_meter():
+                # Measured another way (the RMS, or none): measure again.
+                return None
             analysis = TrackAnalysis(**fields)
         except (TypeError, ValueError):
             # Written by another version of the program: analyze again.
@@ -173,7 +177,11 @@ class TrackCache:
                 codec,
                 title,
                 json.dumps(
-                    {**dataclasses.asdict(analysis), "key_by": key_detector()}
+                    {
+                        **dataclasses.asdict(analysis),
+                        "key_by": key_detector(),
+                        "loudness_by": loudness_meter(),
+                    }
                 ),
                 genre,
                 now,

@@ -162,6 +162,56 @@ async def test_decode_file_gives_the_samples_of_the_file(
     assert pcm[:, 1] == pytest.approx((tone // 2) / 32768, abs=1e-4)
 
 
+def sine(dbfs: float, seconds: float = 5.0) -> np.ndarray:
+    """Make a 997 Hz sine, the same in both channels, at a level in dBFS."""
+    t = np.arange(int(seconds * SR)) / SR
+    wave = (10 ** (dbfs / 20) * np.sin(2 * np.pi * 997 * t)).astype(np.float32)
+    return np.stack([wave, wave], axis=1)
+
+
+needs_essentia = pytest.mark.skipif(
+    dj_mix.loudness_meter() != "ebu r128", reason="needs Essentia"
+)
+
+
+@needs_essentia
+def test_loudness_is_measured_in_lufs_by_ebu_r128() -> None:
+    # The reference of EBU Tech 3341: a sine in both channels is as loud in
+    # LUFS as its level in dBFS (+3 dB for the two channels, and the
+    # weighting at 1 kHz is +0.7 against the -0.7 of the formula).
+    assert dj_mix.measure_loudness(sine(-20)) == pytest.approx(-20.0, abs=0.1)
+    assert dj_mix.measure_loudness(sine(-23)) == pytest.approx(-23.0, abs=0.1)
+    assert dj_mix.measure_loudness(sine(0)) == pytest.approx(0.0, abs=0.1)
+    assert dj_mix.analyze(sine(-20)).loudness_db == pytest.approx(
+        -20.0, abs=0.1
+    )
+
+
+def test_loudness_without_essentia_is_the_rms_on_the_same_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dj_mix, "_essentia", None)
+    assert dj_mix.loudness_meter() == "rms"
+
+    # The RMS of a sine at -20 dBFS is -23 dBFS (the channels are averaged):
+    # with the 2 dB, -21.
+    assert dj_mix.measure_loudness(sine(-20)) == pytest.approx(
+        -23.0 + dj_mix.LUFS_OVER_RMS_DB, abs=0.05
+    )
+
+
+@needs_essentia
+def test_a_piece_too_short_to_gate_is_measured_by_its_rms() -> None:
+    short = sine(-20, seconds=0.2)
+
+    assert dj_mix.measure_loudness(short) == pytest.approx(
+        -23.0 + dj_mix.LUFS_OVER_RMS_DB, abs=0.05
+    )
+    # And silence, which has no loudness, does not break the analysis.
+    silence = np.zeros((SR * 2, 2), np.float32)
+    assert np.isfinite(dj_mix.measure_loudness(silence))
+
+
 def test_tempo_ratio_allows_half_and_double_time() -> None:
     assert dj_mix.tempo_ratio(120, 120) == 1
     assert dj_mix.tempo_ratio(120, 240) == 1

@@ -128,6 +128,20 @@ random tempo, tuning and timbre), the key of which is known:
 Real music is harder than this, so treat the numbers as a comparison of the
 two, not as the accuracy to expect.
 
+## Loudness
+
+The loudness of a track is its integrated loudness in LUFS by EBU R128
+(ITU-R BS.1770: K-weighted, gated), measured by Essentia over the audible part
+of the track. It is `loudness_db` in the API, and the radio compares tracks
+by it (a blend of tracks far apart in loudness is a filter sweep, the cost of
+a pair counts the gap, the energy of a track counts the level). Without
+Essentia, or for a piece shorter than the 400 ms gating block, it is the RMS of
+the samples, plus 2 dB to be on the scale of LUFS (the two differ by 1.8 to 2.5
+dB on the test signals; it is 3 dB for a sine). An analysis in the cache that
+was made the other way is made again. The scale of the energy
+(`ENERGY_LOUDNESS_RANGE_DB` in `dj_mix.py`) is -16 to -4 LUFS. Measuring takes
+a copy of the track in memory, about 130 MB for six minutes.
+
 ## Harmonic mixing
 
 The key of each track is detected (shown as a Camelot Wheel code) and the
@@ -229,7 +243,7 @@ Served next to the stream, no authentication.
 | `PUT /api/moods` `{"moods": ["calm", "fun"]}` | Play only these moods. |
 | `DELETE /api/moods` | Any mood again. |
 
-Each track has `track_id`, `title`, `artists`, `bpm`, `camelot` (Camelot Wheel code such as `8A`, `""` when the key is unknown), `key` (`A minor`), `loudness_db`,
+Each track has `track_id`, `title`, `artists`, `bpm`, `camelot` (Camelot Wheel code such as `8A`, `""` when the key is unknown), `key` (`A minor`), `loudness_db` (LUFS),
 `duration_seconds`, `mood`, `cover` (the URL of the cover, for a Yandex track
 on Yandex's server, with `%%` where the size goes, e.g. `.../%%` -> `.../200x200`; `""` when there
 is none) and `decided`. The first of `next` is already

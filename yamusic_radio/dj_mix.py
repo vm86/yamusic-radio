@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from math import ceil, cos, floor, log, log2, log10, pi
+from math import ceil, cos, floor, isfinite, log, log2, log10, pi
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -188,7 +188,14 @@ REPEAT_WINDOW = 4
 # A set builds up and winds down over this many tracks.
 ARC_TRACKS = 10
 ENERGY_BPM_RANGE = (90.0, 150.0)
-ENERGY_LOUDNESS_RANGE_DB = (-18.0, -6.0)
+# In LUFS. It was (-18, -6) for the RMS in dBFS, which is about 2 dB lower.
+ENERGY_LOUDNESS_RANGE_DB = (-16.0, -4.0)
+# What the RMS of the samples (all channels averaged) is short of the
+# loudness in LUFS (the channels added, K-weighted), for music: measured on
+# test signals it was 1.8 to 2.5 dB.
+LUFS_OVER_RMS_DB = 2.0
+# EBU R128 gates in blocks of 400 ms: a shorter piece has no loudness.
+MIN_LUFS_SECONDS = 0.4
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,12 +255,18 @@ _MINOR_PROFILE = np.array(
 
 
 try:
+    import essentia
     import essentia.standard as _essentia
 
+    # After a loudness is measured, the key extractor says "No network
+    # created" for every frame it takes (thousands of lines a track); the
+    # result is the same.
+    essentia.log.warningActive = False
     _KEY_EXTRACTOR = _essentia.KeyExtractor(
         profileType="edma", sampleRate=SAMPLE_RATE
     )
 except ImportError:
+    _essentia = None
     _KEY_EXTRACTOR = None
 # Essentia spells the flats; the sharps are in NOTES.
 _ESSENTIA_NOTES = {
@@ -264,6 +277,11 @@ _ESSENTIA_NOTES = {
     "Ab": 8,
     "Bb": 10,
 }
+
+
+def loudness_meter() -> str:
+    """Name of what measures the loudness: "ebu r128" or "rms"."""
+    return "rms" if _essentia is None else "ebu r128"
 
 
 def key_detector() -> str:
@@ -593,6 +611,25 @@ def mean_square(pcm: Pcm) -> float:
     return total / pcm.size if pcm.size else 0.0
 
 
+def measure_loudness(body: Pcm) -> float:
+    """Return the integrated loudness of the track in LUFS (EBU R128).
+
+    Essentia measures it. Without Essentia, or where it gives no answer
+    (a piece shorter than a gating block, or all silence), it is the RMS of
+    the samples brought to the same scale.
+    """
+    if _essentia is not None and len(body) >= MIN_LUFS_SECONDS * SAMPLE_RATE:
+        meter = _essentia.LoudnessEBUR128(sampleRate=SAMPLE_RATE)
+        try:
+            integrated = float(meter(np.ascontiguousarray(body))[2])
+        except RuntimeError:
+            integrated = float("-inf")
+        if isfinite(integrated):
+            return integrated
+    rms = float(np.sqrt(mean_square(body) + 1e-12))
+    return 20 * log10(rms) + LUFS_OVER_RMS_DB
+
+
 def analyze(pcm: Pcm) -> TrackAnalysis:
     start, end = audible_range(pcm)
     body = pcm[start:end]
@@ -624,17 +661,20 @@ def analyze(pcm: Pcm) -> TrackAnalysis:
         if outro_start <= intro_end:
             intro_end = outro_start = -1
 
-    rms = float(np.sqrt(mean_square(body) + 1e-12))
+    key = estimate_key(mono)
+    # The mono is not needed any more; Essentia takes a copy of the stereo
+    # to measure the loudness, so that one is not kept in memory with it.
+    del mono
     return TrackAnalysis(
         bpm=bpm,
         head_beat=head_beat,
         tail_beat=tail_beat,
         start=start,
         end=end,
-        loudness_db=20 * log10(rms),
+        loudness_db=measure_loudness(body),
         intro_end=intro_end,
         outro_start=outro_start,
-        key=estimate_key(mono),
+        key=key,
     )
 
 

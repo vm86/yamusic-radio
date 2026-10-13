@@ -55,6 +55,16 @@ def init_logging(*, debug: bool, systemd_run: bool) -> None:
     root_logger.addHandler(handler)
 
 
+def _folder(value: str) -> Path:
+    """Make the folder of --local-dir absolute: the tracks are linked to it.
+
+    A relative path would give links that point nowhere (they are read from
+    another directory), and the settings would keep it for a later run from
+    another place.
+    """
+    return Path(value).expanduser().resolve()
+
+
 def parse_args() -> Namespace:
     parser = ArgumentParser(
         description=(
@@ -104,7 +114,7 @@ def parse_args() -> Namespace:
     )
     parser.add_argument(
         "--local-dir",
-        type=Path,
+        type=_folder,
         default=None,
         help=(
             "Folder with audio files for the local backend; it is turned on "
@@ -214,7 +224,7 @@ def backend_specs(
     `BackendSpec` that makes any `MusicBackend`.
     """
     chosen: Path | None = options.local_dir
-    directory = chosen.expanduser() if chosen else _saved_directory(cache)
+    directory = chosen or _saved_directory(cache)
     return [
         BackendSpec(
             "yandex",

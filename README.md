@@ -34,13 +34,15 @@ backend that fails is left alone for a while (30 s, doubling up to 10 min) and
 the others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
 
-**YouTube Music.** `pip install ".[youtube]"` gives the libraries:
+**YouTube Music.** `pip install ".[youtube]"` gives the libraries (the RPM and the
+Docker image have them already):
 [ytmusicapi](https://github.com/sigma67/ytmusicapi) finds the tracks and
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) downloads their audio (ytmusicapi does
 not give audio). Turn the backend on with `--backend youtube`. It needs no
 sign-in for the public stations, and plays AAC of about 130 kbit/s. yt-dlp
-wants a JavaScript runtime for YouTube: install `deno` (or `node`, `bun`),
-see the [EJS notes](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The station is
+wants a JavaScript runtime for YouTube: install `deno` (or `node`, `bun`; the
+image has `nodejs`, the RPM only suggests it), see the
+[EJS notes](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The station is
 chosen with `--station youtube=STATION`; the default is `charts`:
 
 | Station | Plays |
@@ -360,7 +362,7 @@ requests only build it (`.github/workflows/rpm.yml`).
 
 `yamusic-radio.spec` builds an RPM that holds one executable,
 `/usr/bin/yamusic-dj` (frozen with PyInstaller: Python and all libraries are
-inside), and a user unit `yamusic-dj.service`. The only dependency is
+inside, also those of the YouTube Music backend), and a user unit `yamusic-dj.service`. The only dependency is
 `/usr/bin/ffmpeg` with libmp3lame (from RPM Fusion; `ffmpeg-free` has none).
 The build needs network access, to fetch the libraries from PyPI.
 

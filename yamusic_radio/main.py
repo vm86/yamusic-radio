@@ -17,6 +17,7 @@ from yamusic_radio.cache import DEFAULT_CACHE, TrackCache
 from yamusic_radio.local import LocalBackend
 from yamusic_radio.multi import BackendSpec, MultiBackend
 from yamusic_radio.ya_player import YandexMusicPlayer, has_token
+from yamusic_radio.youtube import YouTubeMusicBackend
 
 faulthandler.enable()
 log = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ log = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path.home() / ".config/yamusic-radio.json"
 DEFAULT_LOG = Path.home() / ".cache/yamusic_radio.log"
 # The ids of backend_specs(), for the command line.
-BACKEND_IDS = ("yandex", "local")
+BACKEND_IDS = ("yandex", "local", "youtube")
 # The cache setting that keeps the backends turned on (the older one,
 # "backend", kept just the one).
 SETTING_BACKENDS = "backends"
@@ -65,10 +66,16 @@ def _folder(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def _file(value: str) -> Path:
+    """Make the file of an option absolute, as the folder of --local-dir."""
+    return Path(value).expanduser().resolve()
+
+
 def parse_args() -> Namespace:
     parser = ArgumentParser(
         description=(
-            "DJ radio: take tracks from Yandex Music and/or a local folder, "
+            "DJ radio: take tracks from Yandex Music, YouTube Music and/or a "
+            "local folder, "
             "beat-match them into one endless mix and stream it as MP3 "
             "and FLAC over HTTP (needs ffmpeg)"
         )
@@ -110,6 +117,18 @@ def parse_args() -> Namespace:
             "all that are on are mixed. The ones of the last run and the "
             "ones that are signed in are on too; the API turns them on "
             "and off"
+        ),
+    )
+    parser.add_argument(
+        "--youtube-auth",
+        type=_file,
+        default=None,
+        help=(
+            "File with the request headers of a browser session of YouTube "
+            "Music (made by `ytmusicapi browser`): the YouTube Music backend "
+            "is turned on, and the station `liked` plays the liked songs. "
+            "Without it the backend can be turned on, and plays the public "
+            "stations (see --station)"
         ),
     )
     parser.add_argument(
@@ -231,6 +250,12 @@ def backend_specs(
             "Yandex Music",
             lambda: YandexMusicPlayer(options.config, session),
             lambda: has_token(options.config),
+        ),
+        BackendSpec(
+            "youtube",
+            "YouTube Music",
+            lambda: YouTubeMusicBackend(options.youtube_auth),
+            lambda: options.youtube_auth is not None,
         ),
         BackendSpec(
             "local",

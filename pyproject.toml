@@ -41,6 +41,9 @@ test = [
 lint = ["mypy", "ruff"]
 # A much better key detection (without it a simpler one is used).
 key = ["essentia"]
+# The YouTube Music backend: ytmusicapi finds the tracks, yt-dlp downloads
+# their audio (and wants deno or node for YouTube).
+youtube = ["ytmusicapi", "yt-dlp"]
 
 [project.scripts]
 yamusic-dj = "yamusic_radio.main:main"
@@ -122,5 +125,5 @@ strict = true
 pretty = true
 
 [[tool.mypy.overrides]]
-module = ["essentia", "essentia.*"]
+module = ["essentia", "essentia.*", "yt_dlp", "yt_dlp.*"]
 ignore_missing_imports = true

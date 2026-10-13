@@ -1,7 +1,7 @@
 # yamusic-radio
 
-Endless DJ radio. Takes tracks from a Yandex Music station and/or from a
-folder of audio files (or from any other source you add as a
+Endless DJ radio. Takes tracks from a Yandex Music station, from YouTube Music
+and/or from a folder of audio files (or from any other source you add as a
 [backend](#adding-a-music-backend)), several at once, beat-matches them (bass
 swap, three-band EQ blend, filter sweeps, optional effects) and streams one
 continuous mix over HTTP: MP3 at 320 kbit/s with ICY titles, and a lossless
@@ -27,12 +27,38 @@ the very first run, when nothing is remembered yet, a backend that is already
 signed in (has a saved token) is on too. After that a backend that was turned
 off through the API stays off, signed in or not; what the command line turned on
 is remembered. Until one is on the radio waits, and `GET /api/auth` lists the
-backends. Two come with the program: `yandex` and `local` (a folder of audio
-files). When a backend is turned off, or cannot be reached, its tracks that are
+backends. Three come with the program: `yandex`, `youtube` (YouTube Music) and `local` (a
+folder of audio files). When a backend is turned off, or cannot be reached, its tracks that are
 only linked (a folder's) leave the queue, and so does its decoded next track. A
 backend that fails is left alone for a while (30 s, doubling up to 10 min) and
 the others carry on. `--station ID=STATION` (repeatable) picks the station of a
 backend; `--station STATION` is for the first one.
+
+**YouTube Music.** `pip install ".[youtube]"` gives the libraries:
+[ytmusicapi](https://github.com/sigma67/ytmusicapi) finds the tracks and
+[yt-dlp](https://github.com/yt-dlp/yt-dlp) downloads their audio (ytmusicapi does
+not give audio). Turn the backend on with `--backend youtube`. It needs no
+sign-in for the public stations, and plays AAC of about 130 kbit/s. yt-dlp
+wants a JavaScript runtime for YouTube: install `deno` (or `node`, `bun`),
+see the [EJS notes](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The station is
+chosen with `--station youtube=STATION`; the default is `charts`:
+
+| Station | Plays |
+|---|---|
+| `charts`, `charts:RU` | the tracks of the top chart playlist (the global one, or of a country by its code) |
+| `radio:VIDEO_ID` | the radio of a song (it gives other songs each time it is asked) |
+| `playlist:PLAYLIST_ID` | the tracks of a playlist |
+| `search:deep house` | the songs found for the words |
+| `liked` | your liked songs (needs `--youtube-auth`) |
+
+Tracks longer than 15 minutes (mixes, sets) and shorter than 30 s are left out.
+`--youtube-auth FILE` takes the headers of a browser session made by
+`ytmusicapi browser` (see its
+[docs](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html)); it
+turns the backend on and gives `liked`. The backend has no moods (the radio
+judges the tracks by their sound) and tells YouTube nothing about what was
+played. Downloading from YouTube is against its terms of service: use it for
+yourself, and at your own risk.
 
 **Local folder.** `--local-dir ~/Music` turns the `local` backend on with that
 folder; the API can choose and change the folder too (it is a field of the
@@ -266,8 +292,9 @@ curl -s -X PUT localhost:8000/api/moods -d '{"moods":["calm","fun"]}'
 The DJ only talks to a `MusicBackend` (`yamusic_radio/backend.py`): it asks
 for batches of tracks from a "station", downloads them to files, and tells
 the backend what was heard. Yandex Music (`ya_player.py`) and a folder of audio files
-(`local.py`, a short one to read first) are two implementations; a Subsonic
-server or a radio is another to write.
+(`local.py`, a short one to read first) are two implementations, and
+`youtube.py` is a third that finds tracks in one library and downloads them
+with another; a Subsonic server or a radio is another to write.
 
 1. **Write a class** with the methods of the `MusicBackend` protocol:
 

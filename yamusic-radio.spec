@@ -13,6 +13,9 @@ BuildRequires:  systemd-rpm-macros
 
 # MP3 output needs ffmpeg with libmp3lame (ffmpeg-free does not have it)
 Requires:       /usr/bin/ffmpeg
+# yt-dlp (the YouTube Music backend) solves the challenges of YouTube with a
+# JavaScript runtime: deno, node or bun.
+Suggests:       nodejs
 
 # The program is one PyInstaller executable: it carries its own Python and
 # libraries, and PyInstaller's archive must not be stripped or recompiled.
@@ -32,13 +35,14 @@ tar -xzf %{_sourcedir}/%{name}-%{version}.tar.gz
 cd %{name}-%{version}
 export SETUPTOOLS_SCM_PRETEND_VERSION=%{version}
 %{python3} -m venv %{_builddir}/venv
-%{_builddir}/venv/bin/pip install --no-cache-dir pyinstaller
-# Essentia finds the keys; it has wheels for Linux x86_64 and macOS. Without it the
-# program falls back to a simpler (and worse) key detection.
-if %{_builddir}/venv/bin/pip install --no-cache-dir ".[key]"; then
+# ".[youtube]" is the YouTube Music backend: ytmusicapi and yt-dlp.
+%{_builddir}/venv/bin/pip install --no-cache-dir pyinstaller ".[youtube]"
+# Essentia finds the keys and the loudness; it has wheels for Linux x86_64 and
+# macOS. Without it the program falls back to a simpler (and worse) key
+# detection and the RMS.
+if %{_builddir}/venv/bin/pip install --no-cache-dir essentia; then
     collect="--collect-all essentia"
 else
-    %{_builddir}/venv/bin/pip install --no-cache-dir .
     collect=""
 fi
 printf 'from yamusic_radio.main import main\n\nmain()\n' > %{_builddir}/launcher.py
@@ -50,6 +54,7 @@ printf 'from yamusic_radio.main import main\n\nmain()\n' > %{_builddir}/launcher
     --distpath %{_builddir}/dist --workpath %{_builddir}/work \
     --specpath %{_builddir} \
     --collect-submodules yandex_music --collect-data yamusic_radio \
+    --collect-all yt_dlp --collect-all yt_dlp_ejs --collect-all ytmusicapi \
     --exclude-module tkinter --exclude-module unittest \
     --exclude-module pydoc --exclude-module doctest \
     --exclude-module distutils --exclude-module setuptools \

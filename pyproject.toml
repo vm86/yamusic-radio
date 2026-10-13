@@ -43,7 +43,7 @@ lint = ["mypy", "ruff"]
 key = ["essentia"]
 # The YouTube Music backend: ytmusicapi finds the tracks, yt-dlp downloads
 # their audio (and wants deno or node for YouTube).
-youtube = ["ytmusicapi", "yt-dlp"]
+youtube = ["ytmusicapi", "yt-dlp[default]"]
 
 [project.scripts]
 yamusic-dj = "yamusic_radio.main:main"

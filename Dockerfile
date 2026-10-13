@@ -17,18 +17,21 @@ WORKDIR /src
 COPY pyproject.toml README.md LICENSE COPYING.LESSER MANIFEST.in ./
 COPY yamusic_radio ./yamusic_radio
 # Essentia finds the keys; it has wheels for Linux x86_64 only, elsewhere the
-# program falls back to a simpler (and worse) key detection.
+# program falls back to a simpler (and worse) key detection. "youtube" is the
+# YouTube Music backend (ytmusicapi and yt-dlp).
 RUN python3 -m venv /opt/venv \
-    && (/opt/venv/bin/pip install ".[key]" || /opt/venv/bin/pip install .)
+    && (/opt/venv/bin/pip install ".[key,youtube]" \
+        || /opt/venv/bin/pip install ".[youtube]")
 
 
 FROM registry.fedoraproject.org/fedora:${FEDORA_VERSION}
 
 # ffmpeg-free has no libmp3lame, which the MP3 output needs: take ffmpeg
-# from RPM Fusion.
+# from RPM Fusion. nodejs is the JavaScript runtime that yt-dlp (the YouTube
+# Music backend) solves the challenges of YouTube with.
 RUN dnf install -y --setopt=install_weak_deps=False \
         "https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm" \
-    && dnf install -y --setopt=install_weak_deps=False python3 ffmpeg libatomic \
+    && dnf install -y --setopt=install_weak_deps=False python3 ffmpeg libatomic nodejs \
     && dnf clean all \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libmp3lame \
     && useradd --system --uid 10001 --create-home --home-dir /home/radio radio \
